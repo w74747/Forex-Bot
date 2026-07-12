@@ -24,6 +24,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
     ProtoOAErrorRes,
     ProtoOAGetAccountListByAccessTokenReq,
+    ProtoOAReconcileReq,
     ProtoOASubscribeSpotsReq,
     ProtoOASymbolsListReq,
     ProtoOATraderReq,
@@ -37,16 +38,22 @@ logger = logging.getLogger("forex_bot.openapi_streamer")
 
 class OpenApiStreamer:
     def __init__(self, cfg: Config, on_price_update: Callable[[str, float, float], None],
-                 on_account_info: Callable[[float, float], None]):
+                 on_account_info: Callable[[float, float], None],
+                 on_reconcile: Optional[Callable[[list], None]] = None):
         """
         on_price_update(symbol_name, bid, ask): يُستدعى عند كل تحديث سعر
         on_account_info(balance, equity): يُستدعى عند وصول معلومات الحساب
+        on_reconcile(positions: list[dict]): يُستدعى مرة واحدة بعد أول مصادقة
+            حساب ناجحة، بقائمة كل الصفقات المفتوحة فعليًا على الخادم —
+            هذا أساس Post-Restore Health Check
         """
         self.cfg = cfg
         self.oa_cfg: OpenApiConfig = cfg.open_api
         self.risk_cfg: RiskConfig = cfg.risk
         self.on_price_update = on_price_update
         self.on_account_info = on_account_info
+        self.on_reconcile = on_reconcile
+        self._has_reconciled = False  # نضمن تشغيله مرة واحدة فقط عند أول إقلاع، وليس عند كل إعادة اتصال
 
         host = EndPoints.PROTOBUF_LIVE_HOST if self.oa_cfg.use_live else EndPoints.PROTOBUF_DEMO_HOST
         self.client = Client(host, EndPoints.PROTOBUF_PORT, TcpProtocol)
@@ -110,6 +117,10 @@ class OpenApiStreamer:
             logger.info("[OpenAPI] تم تحميل الرموز: %s", self.symbol_name_to_id)
             self._subscribe_spots()
 
+            if not self._has_reconciled and self.on_reconcile is not None:
+                self._has_reconciled = True
+                self._send_reconcile_request()
+
         elif payload_type_name == "ProtoOASpotEvent":
             symbol_name = self.symbol_id_to_name.get(payload.symbolId)
             if symbol_name and payload.bid and payload.ask:
@@ -127,6 +138,26 @@ class OpenApiStreamer:
 
         elif payload_type_name == "ProtoOAAmendPositionSLTPRes":
             logger.info("[OpenAPI] تم تعديل SL/TP بنجاح")
+
+        elif payload_type_name == "ProtoOAReconcileRes":
+            positions = []
+            for pos in payload.position:
+                symbol_name = self.symbol_id_to_name.get(pos.tradeData.symbolId, f"ID:{pos.tradeData.symbolId}")
+                scale = 10 ** pos.moneyDigits if pos.moneyDigits else 100000
+                positions.append({
+                    "position_id": pos.positionId,
+                    "symbol_name": symbol_name,
+                    "symbol_id": pos.tradeData.symbolId,
+                    "is_buy": pos.tradeData.tradeSide == 1,  # 1=BUY, 2=SELL (مؤكَّد من ProtoOATradeSide)
+                    "volume_units": pos.tradeData.volume,
+                    "entry_price": pos.price,
+                    "stop_loss": pos.stopLoss if pos.stopLoss else None,
+                    "take_profit": pos.takeProfit if pos.takeProfit else None,
+                    "status": pos.positionStatus,
+                    "commission": pos.commission / scale if pos.commission else 0.0,
+                })
+            logger.info("[OpenAPI] رد التوفيق: %d صفقة مفتوحة على الخادم", len(positions))
+            self.on_reconcile(positions)
 
     # ---------- طلبات مساعدة ----------
 
@@ -157,6 +188,12 @@ class OpenApiStreamer:
 
     def _fetch_trader_info(self):
         request = ProtoOATraderReq()
+        request.ctidTraderAccountId = self.oa_cfg.account_id
+        self.client.send(request).addErrback(self._on_error)
+
+    def _send_reconcile_request(self):
+        logger.info("[OpenAPI] إرسال طلب التوفيق (Reconcile) — جلب الصفقات الحقيقية من الخادم")
+        request = ProtoOAReconcileReq()
         request.ctidTraderAccountId = self.oa_cfg.account_id
         self.client.send(request).addErrback(self._on_error)
 
