@@ -87,8 +87,16 @@ class RiskManager:
             return False
         return True
 
-    def calculate_position_size_lots(self, stop_loss_pips: float, pip_value_per_lot: float = 10.0) -> float:
-        """حجم الصفقة بناءً على % مخاطرة ثابت من رأس المال — مستقل عن الرافعة."""
+    def calculate_position_size_lots(self, stop_loss_pips: float, pip_value_per_lot: float = 10.0,
+                                      contract_size: int = 100_000) -> float:
+        """
+        يحدد حجم الصفقة بلوت حسب وضع الإعدادات:
+          - use_fixed_volume=True  → حجم ثابت دائمًا (trade_volume_units) — موصى به لحساب صغير جدًا
+          - use_fixed_volume=False → % من رأس المال مقسومة على مسافة وقف الخسارة (ديناميكي)
+        """
+        if self.cfg.use_fixed_volume:
+            return round(self.cfg.trade_volume_units / contract_size, 2)
+
         if self.current_equity is None or stop_loss_pips <= 0:
             return 0.0
         risk_amount = self.current_equity * (self.cfg.risk_per_trade_pct / 100.0)
