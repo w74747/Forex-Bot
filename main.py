@@ -35,6 +35,7 @@ from fix_executor import FixExecutor  # noqa: E402
 from market_scanner import MarketScanner, ScannerConfig, SignalType  # noqa: E402
 from openapi_streamer import OpenApiStreamer  # noqa: E402
 from risk_manager import OpenPositionInfo, RiskManager  # noqa: E402
+from startup_reconciliation import StartupReconciler  # noqa: E402
 from telegram_notifier import MonthlyProfitCounter, TelegramNotifier  # noqa: E402
 
 logging.basicConfig(
@@ -71,11 +72,16 @@ class TradingSystem:
             cfg,
             on_price_update=self._on_price_update,
             on_account_info=self._on_account_info,
+            on_reconcile=self._on_reconcile,
         )
         self.fix = FixExecutor(
             cfg,
             on_execution=self._on_fix_execution,
             on_reject=self._on_fix_reject,
+        )
+        self.reconciler = StartupReconciler(
+            sl_pips=self.SL_PIPS, tp_pips=self.TP_PIPS, pip_size=self.PIP_SIZE,
+            amend_sl_tp_fn=self.openapi.amend_position_sl_tp,
         )
 
     # ---------- التشغيل ----------
@@ -234,6 +240,35 @@ class TradingSystem:
 
     def _on_account_info(self, balance: float, equity: float):
         self.risk_manager.update_account_info(balance, equity)
+
+    def _on_reconcile(self, positions: list[dict]):
+        """يُستدعى مرة واحدة عند الإقلاع بقائمة الصفقات الحقيقية من الخادم."""
+        logger.info("[Main] بدء فحص ما بعد الإقلاع لـ %d صفقة", len(positions))
+
+        # إعادة بناء الحالة المحلية من الخادم (مصدر الحقيقة) بدل الاعتماد على
+        # أي ذاكرة محلية قد تكون فُقدت عند إعادة التشغيل
+        for pos in positions:
+            volume_lots = pos["volume_units"] / self.CONTRACT_SIZE
+            sl_price, tp_price = self.reconciler.expected_sl_tp(pos["is_buy"], pos["entry_price"])
+            self._local_positions[pos["position_id"]] = {
+                "symbol_name": pos["symbol_name"],
+                "symbol_id": pos["symbol_id"],
+                "is_buy": pos["is_buy"],
+                "volume_lots": volume_lots,
+                "entry_price": pos["entry_price"],
+                "planned_sl_price": pos["stop_loss"] or sl_price,
+                "planned_tp_price": pos["take_profit"] or tp_price,
+                "closing": False,
+            }
+            self.risk_manager.register_open_position(OpenPositionInfo(
+                position_id=pos["position_id"], symbol_name=pos["symbol_name"],
+                symbol_id=pos["symbol_id"], is_buy=pos["is_buy"], volume_lots=volume_lots,
+            ))
+
+        findings = self.reconciler.run(positions)
+        report = self.reconciler.build_telegram_report(findings)
+        self.telegram.send_async(report)
+        logger.info("[Main] اكتمل فحص ما بعد الإقلاع — تم إرسال التقرير لتيليجرام")
 
     def _emergency_close_all(self, reason: str):
         logger.critical("[Main] تنفيذ إغلاق طارئ لكل الصفقات: %s", reason)
