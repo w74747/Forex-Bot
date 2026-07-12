@@ -1,0 +1,8 @@
+# تم التحقق من هذه الإصدارات فعليًا بالتثبيت والاختبار في بيئة التطوير
+ctrader-open-api==0.9.1
+ctrader-fix==0.1.1
+Twisted==21.7.0
+
+# مطلوبة لدعم اتصال SSL في Twisted (بدونها يفشل الاتصال بصمت مع NameError)
+pyopenssl>=24.0.0
+service_identity>=24.0.0
