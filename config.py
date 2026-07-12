@@ -94,6 +94,19 @@ class RiskConfig:
     )
     target_symbols: List[str] = field(default_factory=lambda: ["EURUSD", "GBPUSD"])
 
+    # ---------- حجم الصفقة الثابت (لحماية الحسابات الصغيرة جدًا) ----------
+    # cTrader يُعبّر عن الحجم بالوحدات (Units) وليس اللوت مباشرة:
+    # 1000 وحدة = 0.01 لوت (Micro Lot) — هذا أصغر حجم متاح غالبًا لدى أغلب الوسطاء.
+    # عند TRUE: يُستخدم هذا الحجم الثابت دائمًا (بدل الحساب الديناميكي القائم
+    # على % المخاطرة)، وهو المناسب لحساب صغير جدًا (~100$) حيث الحساب الديناميكي
+    # قد يُقرَّب أحيانًا إلى صفر ويمنع فتح أي صفقة.
+    use_fixed_volume: bool = field(
+        default_factory=lambda: _env("USE_FIXED_VOLUME", "true").lower() == "true"
+    )
+    trade_volume_units: int = field(
+        default_factory=lambda: int(_env("TRADE_VOLUME_UNITS", "1000"))
+    )
+
 
 @dataclass(frozen=True)
 class Config:
