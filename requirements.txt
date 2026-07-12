@@ -1,6 +1,0 @@
-# لا توجد اعتماديات خارجية حاليًا - الكود يستخدم فقط مكتبات بايثون القياسية
-# (asyncio, dataclasses, statistics, zoneinfo, logging, random, datetime)
-#
-# عند الربط بمصدر بيانات حقيقي (مثل cTrader Open API)، أضف هنا حزم مثل:
-# websockets>=12.0
-# httpx>=0.27
