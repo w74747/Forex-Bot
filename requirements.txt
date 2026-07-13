@@ -6,3 +6,6 @@ Twisted==21.7.0
 # مطلوبة لدعم اتصال SSL في Twisted (بدونها يفشل الاتصال بصمت مع NameError)
 pyopenssl>=24.0.0
 service_identity>=24.0.0
+
+# يستخدمها كلاس Auth داخل ctrader-open-api لتبادل رمز التفويض بتوكن (get_ctrader_credentials.py)
+requests>=2.31.0
