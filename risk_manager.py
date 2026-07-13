@@ -13,7 +13,7 @@ fix_executor.py للتنفيذ الفعلي).
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Callable, Dict, Optional
 
 from config import RiskConfig
@@ -47,7 +47,7 @@ class RiskManager:
     # ---------- تتبع رأس المال ----------
 
     def update_account_info(self, balance: float, equity: float):
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
         if self._last_reset_day != today:
             self._reset_daily_tracking(equity, today)
 
