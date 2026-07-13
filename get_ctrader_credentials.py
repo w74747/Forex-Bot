@@ -1,26 +1,7 @@
-"""
-get_ctrader_credentials.py
-============================
-سكربت تفاعلي لمرة واحدة — يُنجز رحلة OAuth الكاملة تلقائيًا:
-  1. يبني رابط التفويض ويطبعه لك لفتحه بالمتصفح
-  2. تلصق رمز "code" الذي يصلك في رابط التحويل بعد الموافقة
-     ⚠️ هذا الرمز صالح لمدة دقيقة واحدة فقط (مؤكَّد من توثيق cTrader
-     الرسمي) — لهذا هذا السكربت يُنفّذ كل الخطوات التالية فورًا وتلقائيًا
-     بدل أن تبنيها يدويًا خطوة بخطوة
-  3. يُبادل الرمز بـ Access Token و Refresh Token تلقائيًا
-  4. يتصل فعليًا بالخادم (Demo) ويجلب ctidTraderAccountId الحقيقي
-     المرتبط بحسابك تلقائيًا (لا حاجة لتخمينه أو افتراضه)
-  5. يطبع كل القيم الأربع جاهزة للنسخ المباشر إلى Railway Variables
-
-الاستخدام:
-    export CTRADER_CLIENT_ID=xxxxx
-    export CTRADER_CLIENT_SECRET=xxxxx
-    python3 get_ctrader_credentials.py
-"""
-
 import os
 import sys
-
+import time
+import requests
 from ctrader_open_api import Auth, Client, EndPoints, Protobuf, TcpProtocol
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq,
@@ -28,114 +9,75 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
 )
 from twisted.internet import reactor
 
-REDIRECT_URI = os.environ.get("CTRADER_REDIRECT_URI", "https://example.com/callback")
+REDIRECT_URI = "https://example.com/callback"
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+def send_telegram_msg(text):
+    if BOT_TOKEN and CHAT_ID:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"})
+
+def get_telegram_code():
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+    start_time = time.time()
+    send_telegram_msg("⏳ بانتظار إرسالك الـ code هنا في المحادثة... (لديك دقيقة واحدة)")
+    
+    while time.time() - start_time < 60:
+        try:
+            resp = requests.get(url, timeout=5).json()
+            if resp.get("ok") and resp.get("result"):
+                last_msg = resp["result"][-1]["message"]
+                if str(last_msg["chat"]["id"]) == str(CHAT_ID):
+                    text = last_msg["text"].strip()
+                    if len(text) > 10 and not text.startswith("/"):
+                        return text
+        except Exception:
+            pass
+        time.sleep(3)
+    return None
 
 def main():
     client_id = os.environ.get("CTRADER_CLIENT_ID")
     client_secret = os.environ.get("CTRADER_CLIENT_SECRET")
 
-    if not client_id or not client_secret:
-        print("❌ يجب ضبط CTRADER_CLIENT_ID و CTRADER_CLIENT_SECRET كمتغيرات بيئة أولاً.")
+    if not client_id or not client_secret or not BOT_TOKEN:
+        print("❌ نقص في متغيرات البيئة الأساسية.")
         sys.exit(1)
 
     auth = Auth(client_id, client_secret, REDIRECT_URI)
+    
+    # استخدام صلاحية accounts المتوافقة مع حالة Submitted
+    auth_uri = f"https://openapi.ctrader.com/apps/auth?client_id={client_id}&redirect_uri={REDIRECT_URI}&scope=accounts"
+    
+    welcome_text = (
+        f"🔗 <b>خطوة استخراج التوكن السحابي</b>\n\n"
+        f"1. افتح هذا الرابط في متصفحك ووافق على الصلاحيات:\n{auth_uri}\n\n"
+        f"2. بعد الموافقة، سيحولك الرابط لصفحة بيضاء (example.com)، انسخ الـ code الموجود في عنوان الصفحة وصادق عليه بإرساله كرسالة نصية عادية هنا فوراً!"
+    )
+    send_telegram_msg(welcome_text)
 
-    print("=" * 70)
-    print("الخطوة 1: افتح هذا الرابط في متصفحك ووافق على الوصول:")
-    print(auth.getAuthUri())
-    print("=" * 70)
-    print("بعد الموافقة، سيُعيد المتصفح توجيهك لرابط يحتوي على '?code=...'")
-    print("انسخ فقط قيمة code من ذلك الرابط (وليس الرابط كاملاً).")
-    print("⚠️ الرمز صالح لدقيقة واحدة فقط — الصقه هنا فورًا:")
-    print("=" * 70)
-
-    auth_code = input("code = ").strip()
+    auth_code = get_telegram_code()
     if not auth_code:
-        print("❌ لم يُدخَل أي رمز.")
+        send_telegram_msg("❌ انتهت المهلة ولم أستلم الرمز على تيليجرام.")
         sys.exit(1)
 
-    print("\nالخطوة 2: مبادلة الرمز بـ Access/Refresh Token ...")
+    send_telegram_msg("🔄 جاري معالجة الرمز ومبادلته بالتوكن النهائي...")
     token_response = auth.getToken(auth_code)
 
     if token_response.get("errorCode"):
-        print(f"❌ فشل المبادلة: {token_response.get('description')}")
+        send_telegram_msg(f"❌ فشل استخراج التوكن: {token_response.get('description')}")
         sys.exit(1)
 
     access_token = token_response["accessToken"]
-    refresh_token = token_response["refreshToken"]
-    expires_in_days = token_response.get("expiresIn", 0) / 86400
-
-    print(f"✅ تم الحصول على Access Token (صالح تقريبًا {expires_in_days:.0f} يومًا)")
-
-    print("\nالخطوة 3: الاتصال بالخادم لجلب رقم الحساب (ctidTraderAccountId) ...")
-
-    use_live = os.environ.get("CTRADER_USE_LIVE", "false").lower() == "true"
-    host = EndPoints.PROTOBUF_LIVE_HOST if use_live else EndPoints.PROTOBUF_DEMO_HOST
-    client = Client(host, EndPoints.PROTOBUF_PORT, TcpProtocol)
-
-    found_account_ids = []
-
-    def on_connected(c):
-        request = ProtoOAApplicationAuthReq()
-        request.clientId = client_id
-        request.clientSecret = client_secret
-        c.send(request)
-
-    def on_message(c, message):
-        payload = Protobuf.extract(message)
-        type_name = type(payload).__name__
-
-        if type_name == "ProtoOAApplicationAuthRes":
-            request = ProtoOAGetAccountListByAccessTokenReq()
-            request.accessToken = access_token
-            c.send(request)
-
-        elif type_name == "ProtoOAGetAccountListByAccessTokenRes":
-            for account in payload.ctidTraderAccount:
-                found_account_ids.append({
-                    "ctidTraderAccountId": account.ctidTraderAccountId,
-                    "traderLogin": account.traderLogin,
-                    "isLive": account.isLive,
-                })
-            reactor.callLater(0.5, reactor.stop)
-
-        elif type_name == "ProtoOAErrorRes":
-            print(f"❌ خطأ من الخادم: {payload.description}")
-            reactor.callLater(0.5, reactor.stop)
-
-    client.setConnectedCallback(on_connected)
-    client.setMessageReceivedCallback(on_message)
-    client.startService()
-
-    reactor.callLater(15, reactor.stop)  # مهلة أمان لو تعطّل الاتصال
-    reactor.run()
-
-    print("\n" + "=" * 70)
-    if found_account_ids:
-        print("✅ اكتملت العملية! الحسابات المرتبطة بهذا التوكن:\n")
-        for acc in found_account_ids:
-            kind = "LIVE" if acc["isLive"] else "DEMO"
-            print(f"  - Login: {acc['traderLogin']} | النوع: {kind} | "
-                  f"ctidTraderAccountId: {acc['ctidTraderAccountId']}")
-
-        print("\nانسخ هذه القيم إلى Railway Variables:\n")
-        print(f"CTRADER_ACCESS_TOKEN={access_token}")
-        print(f"CTRADER_REFRESH_TOKEN={refresh_token}")
-        if len(found_account_ids) == 1:
-            print(f"CTRADER_ACCOUNT_ID={found_account_ids[0]['ctidTraderAccountId']}")
-        else:
-            print("# وُجد أكثر من حساب — طابق Login أعلاه مع رقم حسابك الظاهر في")
-            print("# Pepperstone Client Area (مثلاً 5310813)، ثم استخدم ctidTraderAccountId المقابل له")
-            print("CTRADER_ACCOUNT_ID=<اختر الرقم المطابق من القائمة أعلاه>")
-    else:
-        print("⚠️ لم يتم العثور على أي حساب. تحقق من صحة Client ID/Secret وأن")
-        print("   التطبيق مُفعَّل (وليس Submitted) على openapi.ctrader.com/apps")
-        print(f"\nمع ذلك، احتفظ بهذين القيمتين فهما صالحتان:")
-        print(f"CTRADER_ACCESS_TOKEN={access_token}")
-        print(f"CTRADER_REFRESH_TOKEN={refresh_token}")
-    print("=" * 70)
-
+    
+    success_msg = (
+        f"✅ <b>مبروك! تم استخراج التوكن بنجاح:</b>\n\n"
+        f"<code>CTRADER_ACCESS_TOKEN={access_token}</code>\n\n"
+        f"قم بنسخ السطر أعلاه وضعه في Railway Variables وافتح البوت!"
+    )
+    send_telegram_msg(success_msg)
+    print("Done successfully via Telegram!")
 
 if __name__ == "__main__":
     main()
