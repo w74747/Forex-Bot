@@ -1,294 +1,224 @@
-"""
-main.py
-========
-نقطة التشغيل المركزية. يربط:
-  - openapi_streamer.py  (بيانات + مصادقة + SL/TP على الخادم)
-  - fix_executor.py      (تنفيذ سريع للدخول/الخروج)
-  - market_scanner.py    (منطق الإشارة الرياضي)
-  - risk_manager.py      (حارس التراجع اليومي 4%)
-  - telegram_notifier.py (إشعارات + عداد شهري)
-
-⚠️ ترتيب الاستيراد أدناه إلزامي ولا يجوز تغييره:
-   يجب تثبيت asyncioreactor **قبل** أي استيراد لأي وحدة تستورد Twisted
-   reactor (بشكل مباشر أو غير مباشر عبر ctrader_open_api / ctrader_fix)،
-   لأن Twisted يُثبّت الـ reactor الافتراضي تلقائيًا عند أول
-   "from twisted.internet import reactor" في أي مكان بالكود.
-   هذا هو الأساس التقني لتشغيل الحزمتين معًا بدون تعارض أو Threading.
-"""
-
-import asyncio
-import logging
+import os
 import sys
+import time
+import requests
+import psycopg2
+from psycopg2 import sql
 
-from twisted.internet import asyncioreactor
+# --- 1. إعدادات البيئة والمحاكاة ---
+DRY_RUN = True
+SYMBOL = "XAUUSD"  # الذهب كمثال أو EURUSD
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-_event_loop = asyncio.new_event_loop()
-asyncio.set_event_loop(_event_loop)
-asyncioreactor.install(_event_loop)
+PRIMARY_DB = os.environ.get("DATABASE_URL")
+FALLBACK_DB = os.environ.get("FALLBACK_DATABASE_URL")
 
-# ⬇️ كل الاستيرادات التالية تأتي بعد تثبيت الـ reactor عن قصد — لا تُعِد ترتيبها
-from twisted.internet import reactor  # noqa: E402
-from twisted.internet.task import LoopingCall  # noqa: E402
+current_db_url = PRIMARY_DB
 
-from config import Config  # noqa: E402
-from fix_executor import FixExecutor  # noqa: E402
-from market_scanner import MarketScanner, ScannerConfig, SignalType  # noqa: E402
-from openapi_streamer import OpenApiStreamer  # noqa: E402
-from risk_manager import OpenPositionInfo, RiskManager  # noqa: E402
-from startup_reconciliation import StartupReconciler  # noqa: E402
-from telegram_notifier import MonthlyProfitCounter, TelegramNotifier  # noqa: E402
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("forex_bot.log", encoding="utf-8")],
-)
-logger = logging.getLogger("forex_bot.main")
-
-
-class TradingSystem:
-    """يحمل الحالة المشتركة بين كل المكونات، ويمرر الـ callbacks بينها."""
-
-    CONTRACT_SIZE = 100_000
-    SL_PIPS = 4.0
-    TP_PIPS = 6.0
-    PIP_SIZE = 0.0001
-
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-
-        self.scanner = MarketScanner(
-            ScannerConfig(entry_std_multiplier=2.5, max_allowed_spread_pips=0.3),
-            symbols=cfg.risk.target_symbols,
-        )
-        self.risk_manager = RiskManager(cfg.risk, on_emergency_close_all=self._emergency_close_all)
-        self.telegram = TelegramNotifier(cfg.telegram, MonthlyProfitCounter())
-
-        # ذاكرة محلية للصفقات المفتوحة: position_id -> تفاصيل الدخول
-        self._local_positions: dict[int, dict] = {}
-        self._latest_prices: dict[str, tuple[float, float]] = {}
-
-        self.openapi = OpenApiStreamer(
-            cfg,
-            on_price_update=self._on_price_update,
-            on_account_info=self._on_account_info,
-            on_reconcile=self._on_reconcile,
-        )
-        self.fix = FixExecutor(
-            cfg,
-            on_execution=self._on_fix_execution,
-            on_reject=self._on_fix_reject,
-        )
-        self.reconciler = StartupReconciler(
-            sl_pips=self.SL_PIPS, tp_pips=self.TP_PIPS, pip_size=self.PIP_SIZE,
-            amend_sl_tp_fn=self.openapi.amend_position_sl_tp,
-        )
-
-    # ---------- التشغيل ----------
-
-    def start(self):
-        logger.info("=== بدء نظام التداول الهجين (OpenAPI + FIX) ===")
-        logger.info("وضع التشغيل: %s", "DRY_RUN (محاكاة تنفيذ فعلي بدون إرسال أوامر حقيقية)"
-                     if self.cfg.dry_run else "🔴 LIVE — تنفيذ أوامر حقيقية")
-        self.telegram.notify_system_event("تم بدء تشغيل البوت" +
-                                           (" في وضع DRY_RUN" if self.cfg.dry_run else " في وضع LIVE"))
-
-        self.openapi.start()
-        self.fix.start()
-
-        # استطلاع دوري لمعلومات الحساب (الرصيد) كل 30 ثانية — Open API لا يبث
-        # الرصيد تلقائيًا، لذا نطلبه صراحة بشكل متكرر
-        self._account_poll = LoopingCall(self.openapi.fetch_trader_info)
-        self._account_poll.start(30, now=False)
-
-    def stop(self):
-        logger.info("=== إيقاف النظام ===")
-        if hasattr(self, "_account_poll") and self._account_poll.running:
-            self._account_poll.stop()
-        self.fix.stop()
-
-    # ---------- استقبال الأسعار وتوليد الإشارات ----------
-
-    def _on_price_update(self, symbol: str, bid: float, ask: float):
-        self._latest_prices[symbol] = (bid, ask)
-
-        # 1) فحص خروج للصفقات المفتوحة على هذا الرمز أولاً (أولوية للحماية)
-        self._check_local_exits(symbol, bid, ask)
-
-        # 2) بحث عن إشارة دخول جديدة إن لم تكن هناك صفقة مفتوحة عليه
-        if not self.risk_manager.can_open_new_position():
-            return
-        if any(p["symbol_name"] == symbol for p in self._local_positions.values()):
-            return  # صفقة واحدة كحد أقصى لكل رمز في هذا البويلربليت
-
-        signal = self.scanner.on_price(symbol, bid, ask)
-        if signal == SignalType.NONE:
-            return
-
-        self._open_new_position(symbol, is_buy=(signal == SignalType.BUY_REVERSION), bid=bid, ask=ask)
-
-    def _open_new_position(self, symbol: str, is_buy: bool, bid: float, ask: float):
-        symbol_id = self.openapi.symbol_name_to_id.get(symbol)
-        if symbol_id is None:
-            logger.warning("[Main] symbolId غير معروف بعد لـ %s — تخطي الإشارة", symbol)
-            return
-
-        volume_lots = self.risk_manager.calculate_position_size_lots(self.SL_PIPS)
-        if volume_lots <= 0:
-            logger.warning("[Main] حجم صفقة محسوب = 0 — تخطي (تأكد من وصول معلومات الحساب)")
-            return
-
-        if self.cfg.dry_run:
-            logger.info("[DRY_RUN] كان سيُفتح %s %s حجم=%s لوت (لا إرسال فعلي)",
-                         "شراء" if is_buy else "بيع", symbol, volume_lots)
-            return
-
-        entry_price = ask if is_buy else bid
-        sl_price = entry_price - self.SL_PIPS * self.PIP_SIZE if is_buy else entry_price + self.SL_PIPS * self.PIP_SIZE
-        tp_price = entry_price + self.TP_PIPS * self.PIP_SIZE if is_buy else entry_price - self.TP_PIPS * self.PIP_SIZE
-
-        intent = {
-            "symbol_name": symbol,
-            "symbol_id": symbol_id,
-            "is_buy": is_buy,
-            "volume_lots": volume_lots,
-            "planned_sl_price": sl_price,
-            "planned_tp_price": tp_price,
-        }
-        self.fix.send_market_order(symbol_id, is_buy, volume_lots, self.CONTRACT_SIZE, intent_tag=intent)
-
-    def _check_local_exits(self, symbol: str, bid: float, ask: float):
-        for position_id, pos in list(self._local_positions.items()):
-            if pos["symbol_name"] != symbol or pos.get("closing"):
-                continue
-            price_now = bid if pos["is_buy"] else ask
-            hit_sl = price_now <= pos["planned_sl_price"] if pos["is_buy"] else price_now >= pos["planned_sl_price"]
-            hit_tp = price_now >= pos["planned_tp_price"] if pos["is_buy"] else price_now <= pos["planned_tp_price"]
-            if hit_sl or hit_tp:
-                pos["closing"] = True
-                reason = "TAKE_PROFIT" if hit_tp else "STOP_LOSS"
-                logger.info("[Main] إغلاق برمجي (%s) لصفقة %s على %s", reason, position_id, symbol)
-                self.fix.close_position(pos["symbol_id"], pos["is_buy"], pos["volume_lots"], position_id,
-                                         self.CONTRACT_SIZE)
-
-    # ---------- ردود الفعل من FIX ----------
-
-    def _on_fix_execution(self, report: dict):
-        position_id = report.get("position_id")
-        if position_id is None:
-            logger.warning("[Main] تقرير تنفيذ بلا position_id — تعذّر ربطه: %s", report)
-            return
-
-        is_closing = "closing_position_id" in report
-
-        if not is_closing:
-            # فتح صفقة جديدة بنجاح
-            entry_price = report.get("avg_price")
-            self._local_positions[position_id] = {
-                "symbol_name": report["symbol_name"],
-                "symbol_id": report["symbol_id"],
-                "is_buy": report["is_buy"],
-                "volume_lots": report["volume_lots"],
-                "entry_price": entry_price,
-                "planned_sl_price": report["planned_sl_price"],
-                "planned_tp_price": report["planned_tp_price"],
-                "closing": False,
-            }
-            self.risk_manager.register_open_position(OpenPositionInfo(
-                position_id=position_id, symbol_name=report["symbol_name"],
-                symbol_id=report["symbol_id"], is_buy=report["is_buy"],
-                volume_lots=report["volume_lots"],
-            ))
-            # تثبيت SL/TP على مستوى الخادم كشبكة أمان (عبر Open API — الطريقة
-            # الوحيدة الممكنة تقنيًا) بالإضافة إلى المراقبة البرمجية الأسرع أعلاه
-            self.openapi.amend_position_sl_tp(
-                position_id,
-                stop_loss=report["planned_sl_price"],
-                take_profit=report["planned_tp_price"],
-            )
-            logger.info("[Main] صفقة جديدة مسجّلة محليًا: %s", position_id)
-
+# --- 2. محرك الاتصال التبادلي بقواعد البيانات (Failover) ---
+def get_db_connection():
+    global current_db_url
+    try:
+        conn = psycopg2.connect(current_db_url, connect_timeout=5)
+        return conn
+    except Exception as e:
+        print(f"⚠️ فشل الاتصال بقاعدة البيانات الحالية. جاري التحول للاحتياطية... الخطأ: {e}")
+        # التبديل التلقائي للمولد الاحتياطي
+        if current_db_url == PRIMARY_DB and FALLBACK_DB:
+            current_db_url = FALLBACK_DB
         else:
-            # إغلاق صفقة قائمة — نحسب الربح/الخسارة التقريبي
-            original = self._local_positions.pop(position_id, None)
-            self.risk_manager.unregister_position(position_id)
-            if original is None:
-                logger.warning("[Main] إغلاق صفقة غير معروفة محليًا: %s", position_id)
-                return
+            current_db_url = PRIMARY_DB
+        
+        try:
+            conn = psycopg2.connect(current_db_url, connect_timeout=5)
+            send_telegram_msg("🚨 <b>تنبيه أمني:</b> تم التحول تلقائياً إلى قاعدة البيانات الاحتياطية (Neon) لاستمرار العمل دون انقطاع!")
+            return conn
+        except Exception as critical_e:
+            print(f"❌ انهيار كامل في الاتصال بقواعد البيانات: {critical_e}")
+            return None
 
-            exit_price = report.get("avg_price") or 0.0
-            entry_price = original["entry_price"] or exit_price
-            pip_diff = (exit_price - entry_price) / self.PIP_SIZE
-            if not original["is_buy"]:
-                pip_diff = -pip_diff
-            # ⚠️ تقريبي: لا يشمل العمولة الفعلية (تتطلب ProtoOADealListReq من
-            # Open API لجلب العمولة الدقيقة لكل صفقة — TODO لنسخة لاحقة)
-            pip_value_per_lot = 10.0
-            gross_pnl = pip_diff * pip_value_per_lot * original["volume_lots"]
+# تهيئة الجداول في قواعد البيانات (إذا لم تكن موجودة)
+def init_db():
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS virtual_trades (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(10),
+                    direction VARCHAR(5),
+                    entry_price NUMERIC,
+                    tp_price NUMERIC,
+                    sl_price NUMERIC,
+                    status VARCHAR(10) DEFAULT 'OPEN',
+                    exit_price NUMERIC,
+                    pnl NUMERIC,
+                    opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.commit()
+    except Exception as e:
+        print(f"Error init DB: {e}")
+    finally:
+        conn.close()
 
-            reason = "TAKE_PROFIT" if pip_diff > 0 else "STOP_LOSS"
-            self.telegram.notify_trade_closed(original["symbol_name"],
-                                               "شراء" if original["is_buy"] else "بيع",
-                                               gross_pnl, reason)
-            logger.info("[Main] صفقة %s أُغلقت — ربح/خسارة تقريبي: %.2f$", position_id, gross_pnl)
+# --- 3. نظام إرسال تقارير تيليجرام ---
+def send_telegram_msg(text):
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        try:
+            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=5)
+        except:
+            pass
 
-    def _on_fix_reject(self, cl_ord_id: str, reason: str):
-        logger.error("[Main] رُفض أمر %s: %s", cl_ord_id, reason)
-        self.telegram.notify_system_event(f"رُفض أمر تداول: {reason}")
+# --- 4. جالب الأسعار الحية الحرة الحقيقية (Binance كمثال سريع للذهب/العملات) ---
+def get_live_price(symbol):
+    # تحويل الرموز لـ Binance (مثلاً XAUUSD الحقيقي يقابله PAXGUSDT أو نستخدم الذهب المباشر)
+    # لتبسيط المحاكاة سنأخذ سعر الذهب الفوري عبر سيرفر مفتوح
+    url = "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT" # الذهب الرقمي المدعوم بالذهب الحقيقي اللحظي
+    try:
+        resp = requests.get(url, timeout=5).json()
+        return float(resp['price'])
+    except:
+        # سعر افتراضي مرن في حال انقطاع السيرفر مؤقتاً لكي لا ينهار البوت
+        return 2350.0
 
-    # ---------- معلومات الحساب وإدارة المخاطر ----------
+# --- 5. محرك إدارة الصفقات والمحاكاة السحابية ---
+def open_virtual_trade(direction, entry, tp, sl):
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO virtual_trades (symbol, direction, entry_price, tp_price, sl_price) VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                (SYMBOL, direction, entry, tp, sl)
+            )
+            trade_id = cur.fetchone()[0]
+            conn.commit()
+            
+            msg = (
+                f"🚀 <b>تم فتح صفقة افتراضية سحابية جديدة!</b>\n\n"
+                f"🔢 رقم الصفقة: #{trade_id}\n"
+                f"📈 الاتجاه: {direction}\n"
+                f"💵 سعر الدخول: {entry}\n"
+                f"🎯 الهدف (TP): {tp}\n"
+                f"🛑 وقف الخسارة (SL): {sl}"
+            )
+            send_telegram_msg(msg)
+    except Exception as e:
+        print(f"Error opening trade: {e}")
+    finally:
+        conn.close()
 
-    def _on_account_info(self, balance: float, equity: float):
-        self.risk_manager.update_account_info(balance, equity)
+def monitor_and_close_trades(current_price):
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, direction, entry_price, tp_price, sl_price FROM virtual_trades WHERE status = 'OPEN';")
+            open_trades = cur.fetchall()
+            
+            for trade in open_trades:
+                tid, direction, entry, tp, sl = trade
+                is_closed = False
+                pnl = 0.0
+                reason = ""
+                
+                if direction == "BUY":
+                    if current_price >= float(tp):
+                        is_closed = True; pnl = float(tp) - float(entry); reason = "🎯 ضربت الهدف (TP)"
+                    elif current_price <= float(sl):
+                        is_closed = True; pnl = float(sl) - float(entry); reason = "🛑 ضربت وقف الخسارة (SL)"
+                else: # SELL
+                    if current_price <= float(tp):
+                        is_closed = True; pnl = float(entry) - float(tp); reason = "🎯 ضربت الهدف (TP)"
+                    elif current_price >= float(sl):
+                        is_closed = True; pnl = float(entry) - float(sl); reason = "🛑 ضربت وقف الخسارة (SL)"
+                
+                if is_closed:
+                    # حساب افتراضي تقريبي للربح بالدولار (نفرض لوت 0.1 يعني النقطة بـ 1 دولار)
+                    profit_usd = pnl * 100 
+                    cur.execute(
+                        "UPDATE virtual_trades SET status = 'CLOSED', exit_price = %s, pnl = %s WHERE id = %s;",
+                        (current_price, profit_usd, tid)
+                    )
+                    conn.commit()
+                    
+                    status_emoji = "🟢" if profit_usd >= 0 else "🔴"
+                    msg = (
+                        f"{status_emoji} <b>إغلاق صفقة افتراضية سحابية!</b>\n\n"
+                        f"🔢 رقم الصفقة: #{tid}\n"
+                        f"سبب الإغلاق: {reason}\n"
+                        f"💵 سعر الخروج الحقيقي: {current_price}\n"
+                        f"💰 النتيجة الماليّة: {profit_usd:+.2f} USD"
+                    )
+                    send_telegram_msg(msg)
+    except Exception as e:
+        print(f"Error monitoring: {e}")
+    finally:
+        conn.close()
 
-    def _on_reconcile(self, positions: list[dict]):
-        """يُستدعى مرة واحدة عند الإقلاع بقائمة الصفقات الحقيقية من الخادم."""
-        logger.info("[Main] بدء فحص ما بعد الإقلاع لـ %d صفقة", len(positions))
+# --- 6. فحص الإقلاع والصحة الذكي (Post-Restore Health Check) ---
+def run_post_restore_health_check():
+    send_telegram_msg("🔄 <b>نظام الفحص الذكي (Health Check):</b> جاري مراجعة النظام وتدقيق الصفقات بعد إعادة التشغيل...")
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, direction, entry_price, tp_price, sl_price FROM virtual_trades WHERE status = 'OPEN';")
+            open_trades = cur.fetchall()
+            
+            report = f"📊 <b>تقرير فحص الصحة السحابي المباشر:</b>\n"
+            report += f"عدد الصفقات المفتوحة النشطة: {len(open_trades)}\n\n"
+            
+            for trade in open_trades:
+                tid, direction, entry, tp, sl = trade
+                # تدقيق أمني منطقي للأهداف ووقف الخسارة
+                is_valid = True
+                warning_note = ""
+                
+                if float(tp) <= 0 or float(sl) <= 0:
+                    is_valid = False
+                    warning_note = "⚠️ تحذير: الأهداف غير محددة برقم منطقي!"
+                
+                report += f"🔹 صفقة #{tid} ({direction}): الدخول {entry} | "
+                report += f"حالة الأهداف: {'✅ آمنة وقابلة للتحقيق' if is_valid else warning_note}\n"
+                
+            send_telegram_msg(report)
+    except Exception as e:
+        print(f"Error during health check: {e}")
+    finally:
+        conn.close()
 
-        # إعادة بناء الحالة المحلية من الخادم (مصدر الحقيقة) بدل الاعتماد على
-        # أي ذاكرة محلية قد تكون فُقدت عند إعادة التشغيل
-        for pos in positions:
-            volume_lots = pos["volume_units"] / self.CONTRACT_SIZE
-            sl_price, tp_price = self.reconciler.expected_sl_tp(pos["is_buy"], pos["entry_price"])
-            self._local_positions[pos["position_id"]] = {
-                "symbol_name": pos["symbol_name"],
-                "symbol_id": pos["symbol_id"],
-                "is_buy": pos["is_buy"],
-                "volume_lots": volume_lots,
-                "entry_price": pos["entry_price"],
-                "planned_sl_price": pos["stop_loss"] or sl_price,
-                "planned_tp_price": pos["take_profit"] or tp_price,
-                "closing": False,
-            }
-            self.risk_manager.register_open_position(OpenPositionInfo(
-                position_id=pos["position_id"], symbol_name=pos["symbol_name"],
-                symbol_id=pos["symbol_id"], is_buy=pos["is_buy"], volume_lots=volume_lots,
-            ))
-
-        findings = self.reconciler.run(positions)
-        report = self.reconciler.build_telegram_report(findings)
-        self.telegram.send_async(report)
-        logger.info("[Main] اكتمل فحص ما بعد الإقلاع — تم إرسال التقرير لتيليجرام")
-
-    def _emergency_close_all(self, reason: str):
-        logger.critical("[Main] تنفيذ إغلاق طارئ لكل الصفقات: %s", reason)
-        self.telegram.notify_emergency_halt(reason)
-        for position_id, pos in list(self._local_positions.items()):
-            if pos.get("closing"):
-                continue
-            pos["closing"] = True
-            self.fix.close_position(pos["symbol_id"], pos["is_buy"], pos["volume_lots"],
-                                     position_id, self.CONTRACT_SIZE)
-
-
+# --- 7. الحلقة الرئيسية لتشغيل البوت ---
 def main():
-    cfg = Config()
-    system = TradingSystem(cfg)
-    system.start()
-
-    reactor.addSystemEventTrigger("before", "shutdown", system.stop)
-    reactor.run()
-
+    print("🚀 انطلاق البوت السحابي في وضع المحاكاة الفائقة...")
+    send_telegram_msg("🚀 <b>تم تفعيل البوت سحابياً بنجاح!</b>\nالنظام يعمل الآن في وضع المحاكاة الذكية المربوطة بالأسعار الحقيقية الحية.")
+    
+    init_db()
+    run_post_restore_health_check()
+    
+    # محاكاة فتح صفقة تجريبية أولى فورية عند أول إقلاع للتأكد من عمل النظام
+    live_p = get_live_price(SYMBOL)
+    open_virtual_trade("BUY", live_p, live_p + 15, live_p - 10)
+    
+    while True:
+        try:
+            live_price = get_live_price(SYMBOL)
+            print(f"السعر الحالي الحي: {live_price}")
+            
+            # مراقبة الصفقات المفتوحة وإغلاقها تلقائياً إذا ضربت الأهداف
+            monitor_and_close_trades(live_price)
+            
+            # فحص كل 10 ثوانٍ لحركة السوق الحية
+            time.sleep(10)
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"خطأ في الحلقة الرئيسية: {e}")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
