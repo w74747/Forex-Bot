@@ -9,32 +9,34 @@ from psycopg2 import sql
 DRY_RUN = True
 INITIAL_BALANCE = 200.0
 
-# تعريف الأصول المدعومة مع إعدادات السكالبينج الخاصة بكل منها:
-# (TP: جني الأرباح بالدولار، SL: وقف الخسارة بالدولار، LOT_SIZE: حجم العقد)
+# تعريف الأصول مع إعدادات منفصلة ودقيقة (تتوافق حساباتها مع الـ 200$)
 ASSETS_CONFIG = {
     "XAUUSD": {
         "coingecko_id": "pax-gold",
         "lot_size": 0.02,
-        "tp_dist": 1.50,   # هدف سريع (1.5 دولار من حركة الذهب)
-        "sl_dist": 3.00,   # ستوب لحماية الحساب من التقلب العنيف للذهب
-        "commission": 7.00, # عمولة البروكر لكل لوت كامل
-        "spread": 0.15     # سبريد متوسط افتراضي
+        "tp_dist": 1.50,    # هدف 1.5 دولار من حركة الذهب
+        "sl_dist": 3.00,    # ستوب 3 دولار
+        "commission": 7.00, # لكل لوت كامل
+        "spread": 0.15,
+        "multiplier": 100.0 # مضاعف النقاط للذهب
     },
     "BTCUSD": {
         "coingecko_id": "bitcoin",
         "lot_size": 0.01,
-        "tp_dist": 150.0,  # هدف خاطف بالدولار لحركة البيتكوين
-        "sl_dist": 300.0,  # وقف خسارة حامٍ للحساب
+        "tp_dist": 150.0,   # هدف 150$ من حركة البيتكوين
+        "sl_dist": 300.0,   # ستوب 300$
         "commission": 5.00,
-        "spread": 10.0
+        "spread": 10.0,
+        "multiplier": 1.0   # العملات تحسب حركة الدولار المباشرة ضرب اللوت
     },
     "ETHUSD": {
         "coingecko_id": "ethereum",
         "lot_size": 0.05,
-        "tp_dist": 8.00,   # هدف سكالبينج خاطف للايثيريوم
-        "sl_dist": 16.00,  # وقف خسارة آمن
+        "tp_dist": 8.00,    # هدف 8$ للايثيريوم
+        "sl_dist": 16.00,   # ستوب 16$
         "commission": 5.00,
-        "spread": 0.50
+        "spread": 0.50,
+        "multiplier": 1.0
     }
 }
 
@@ -45,7 +47,7 @@ FALLBACK_DB = os.environ.get("FALLBACK_DATABASE_URL")
 
 current_db_url = PRIMARY_DB
 
-# --- 2. محرك قاعدة البيانات والأرشفة التفصيلية ---
+# --- 2. محرك قاعدة البيانات والأرشفة ---
 def get_db_connection():
     global current_db_url
     try:
@@ -68,7 +70,6 @@ def init_db():
     if not conn: return
     try:
         with conn.cursor() as cur:
-            # جدول الصفقات المطور (يحتوي على رمز الأصل وعمود الرصيد التراكمي)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS virtual_trades (
                     id SERIAL PRIMARY KEY,
@@ -86,7 +87,6 @@ def init_db():
                     opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # جدول أرشيف لوج النظام الكامل
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS system_logs (
                     id SERIAL PRIMARY KEY,
@@ -127,7 +127,7 @@ def get_current_balance():
     finally:
         conn.close()
 
-# --- 3. تيليجرام وجالب الأسعار اللحظية المتعددة ---
+# --- 3. الاتصالات والأسعار الحية ---
 def send_telegram_msg(text):
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -135,7 +135,6 @@ def send_telegram_msg(text):
         except: pass
 
 def get_live_prices():
-    # جلب جميع أسعار الأصول المحددة في طلب واحد لتوفير استهلاك الخادم والشبكة
     ids = ",".join([config["coingecko_id"] for config in ASSETS_CONFIG.values()])
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd"
     prices = {}
@@ -151,21 +150,20 @@ def get_live_prices():
         log_to_db("PRICE_ERROR", f"فشل جلب الأسعار المتعددة: {e}")
     return prices
 
-# --- 4. إدارة الصفقات الخاطفة متعددة الأصول ---
+# --- 4. محرك تداول السكالبينج المصحح ---
 def open_scalping_trade(symbol, direction, entry):
     config = ASSETS_CONFIG[symbol]
     conn = get_db_connection()
     if not conn: return
     try:
         with conn.cursor() as cur:
-            # التحقق مما إذا كانت هناك صفقة مفتوحة بالفعل لهذا الأصل لمنع التكرار المفرط
             cur.execute("SELECT COUNT(*) FROM virtual_trades WHERE symbol = %s AND status = 'OPEN';", (symbol,))
             if cur.fetchone()[0] > 0: return 
             
             tp = entry + config["tp_dist"] if direction == "BUY" else entry - config["tp_dist"]
             sl = entry - config["sl_dist"] if direction == "BUY" else entry + config["sl_dist"]
             
-            # حساب رسوم المنصة بدقة للصفقة الحالية بناء على حجم لوت الأصل المحدد
+            # حساب الرسوم المخصصة بناءً على لوت الأصل وإعداداته المحددة
             trade_fees = (config["commission"] * config["lot_size"] * 2) + (config["spread"] * config["lot_size"] * 100)
             
             cur.execute(
@@ -203,37 +201,37 @@ def monitor_and_close_trades(prices):
             for trade in open_trades:
                 tid, symbol, direction, entry, tp, sl, fees = trade
                 current_price = prices.get(symbol)
-                if not current_price: continue # في حال تعذر جلب السعر اللحظي لهذا الزوج مؤقتاً
+                
+                # تخطي المراقبة للأصل إذا لم يتوفر سعره الحقيقي في هذا التحديث (يمنع استخدام أسعار عشوائية!)
+                if current_price is None or current_price <= 0: continue 
                 
                 config = ASSETS_CONFIG[symbol]
                 is_closed = False
                 gross_pnl = 0.0
                 reason = ""
                 
-                # حساب النسبة الحركية الخاصة بكل لوت لكل أصل
-                multiplier = 100 if symbol == "XAUUSD" else 1.0 # الذهب يحتاج لمضاعف النقاط أما غيره فيحسب كأصل مباشر
-                
+                # حساب حركة السعر بدقة بناء على لوت الأصل ومضاعفه الفردي
                 if direction == "BUY":
                     if current_price >= float(tp):
-                        is_closed = True; gross_pnl = (float(tp) - float(entry)) * config["lot_size"] * multiplier; reason = "🎯 تم قنص الهدف!"
+                        is_closed = True; gross_pnl = (float(tp) - float(entry)) * config["lot_size"] * config["multiplier"]; reason = "🎯 تم قنص الهدف!"
                     elif current_price <= float(sl):
-                        is_closed = True; gross_pnl = (float(sl) - float(entry)) * config["lot_size"] * multiplier; reason = "🛑 ضربت الستوب لحماية رأس المال"
+                        is_closed = True; gross_pnl = (float(sl) - float(entry)) * config["lot_size"] * config["multiplier"]; reason = "🛑 ضربت الستوب لحماية رأس المال"
                 else: # SELL
                     if current_price <= float(tp):
-                        is_closed = True; gross_pnl = (float(entry) - float(tp)) * config["lot_size"] * multiplier; reason = "🎯 تم قنص الهدف!"
+                        is_closed = True; gross_pnl = (float(entry) - float(tp)) * config["lot_size"] * config["multiplier"]; reason = "🎯 تم قنص الهدف!"
                     elif current_price >= float(sl):
-                        is_closed = True; gross_pnl = (float(entry) - float(sl)) * config["lot_size"] * multiplier; reason = "🛑 ضربت الستوب لحماية رأس المال"
+                        is_closed = True; gross_pnl = (float(entry) - float(sl)) * config["lot_size"] * config["multiplier"]; reason = "🛑 ضربت الستوب لحماية رأس المال"
                 
                 if is_closed:
                     net_pnl = gross_pnl - float(fees)
                     
-                    # 1. حساب الرصيد التراكمي المحدث
-                    cur.execute("SELECT SUM(net_pnl) FROM virtual_trades WHERE status = 'CLOSED';")
+                    # حساب الرصيد التراكمي المحدث
+                    cur.execute("SELECT SUM(net_pnl) FROM virtual_trades WHERE status = 'CLOSED' AND id != %s;", (tid,))
                     past_net = cur.fetchone()[0]
                     past_net_val = float(past_net if past_net else 0)
                     new_cumulative_balance = INITIAL_BALANCE + past_net_val + net_pnl
                     
-                    # 2. التحديث الفوري في الأرشيف
+                    # التحديث في الأرشيف
                     cur.execute(
                         "UPDATE virtual_trades SET status = 'CLOSED', exit_price = %s, gross_pnl = %s, net_pnl = %s, cumulative_balance = %s WHERE id = %s;",
                         (current_price, gross_pnl, net_pnl, new_cumulative_balance, tid)
@@ -262,42 +260,41 @@ def monitor_and_close_trades(prices):
 # --- 5. الفحص عند الإقلاع ---
 def run_post_restore_health_check():
     balance = get_current_balance()
-    log_to_db("HEALTH_CHECK", f"بدء الفحص الذكي للأصول المتعددة. الرصيد الحالي الموثق: {balance:.2f} USD")
+    log_to_db("HEALTH_CHECK", f"بدء الفحص الذكي. الرصيد الموثق: {balance:.2f} USD")
     msg = (
-        f"⚙️ <b>فحص الصلاحية والمطبعة الذكية المحدثة:</b>\n"
+        f"⚙️ <b>فحص الصلاحية والمطبعة الذكية المصححة:</b>\n"
         f"💳 الرصيد التراكمي الحالي: {balance:.2f} USD\n"
         f"📂 الأصول النشطة للتداول: {', '.join(ASSETS_CONFIG.keys())}\n"
-        f"🗄️ <b>أرشيف قاعدة البيانات:</b> نشط بالكامل ويحدث الصفقات والـ Logs بدقة تفصيلية."
+        f"🗄️ تم إصلاح تداخل العملات والأسعار تماماً."
     )
     send_telegram_msg(msg)
 
 # --- 6. حلقة العمل الأساسية المتواصلة ---
 def main():
     init_db()
-    log_to_db("SYSTEM_START", "تم إطلاق النسخة متعددة الأصول والأرشفة الدائمة.")
+    log_to_db("SYSTEM_START", "تم إطلاق النسخة متعددة الأصول المصححة والآمنة.")
     run_post_restore_health_check()
     
     while True:
         try:
             prices = get_live_prices()
             
-            # التحقق من كل أصل وإطلاق صفقات سكالبينج تزامنية
             for symbol, price in prices.items():
-                if price is None: continue
+                if price is None or price <= 0: continue
                 
                 conn = get_db_connection()
                 if conn:
                     with conn.cursor() as cur:
                         cur.execute("SELECT COUNT(*) FROM virtual_trades WHERE symbol = %s AND status = 'OPEN';", (symbol,))
                         if cur.fetchone()[0] == 0:
-                            # فتح صفقة BUY تجريبية للتحقق من زخم حركة الزوج وسرعة استجابته
+                            # فتح صفقة BUY مع سعر الأصل الصحيح وليس الذهب!
                             open_scalping_trade(symbol, "BUY", price)
                     conn.close()
             
             monitor_and_close_trades(prices)
-            time.sleep(5)  # مراقبة سريعة كل 5 ثوانٍ لاصطياد الفرص الفائقة
+            time.sleep(5)  
         except Exception as e:
-            log_to_db("CRITICAL_LOOP_ERROR", f"انهيار مؤقت في حلقة التداول المتعددة: {e}")
+            log_to_db("CRITICAL_LOOP_ERROR", f"انهيار مؤقت في حلقة التداول: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
