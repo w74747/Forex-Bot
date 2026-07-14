@@ -1,15 +1,12 @@
 """
-paper_trading_live.py
-=======================
-نظام محاكاة تداول حقيقي (Paper Trading) بأسعار فوركس فعلية - وليس أسعار
-عملات رقمية كما فعل الكود السابق بالخطأ. كل الصفقات وهمية 100% (لا مال
-حقيقي)، لكن الأسعار حقيقية والمنطق مطابق تمامًا لما اختبرناه واجتاز
-16 اختبارًا وحدويًا سابقًا في هذا المشروع.
+paper_trading_live.py (v2)
+============================
+تحديث: إضافة USDJPY وAUDUSD لتنويع حقيقي (ارتباط إحصائي أقل مع EUR/GBP).
 
-الفرق الجوهري عن كود Gemini:
-- لا يوجد متغير سعر مشترك بين الأصول (سبب خسارة الـ 1000$ الوهمية سابقًا)
-- إشارات BUY و SELL حقيقيتان مبنيتان على انحراف السعر إحصائيًا، وليس BUY دائمًا
-- مصدر بيانات فوركس حقيقي، وليس عملات رقمية بأسماء مضللة
+⚠️ تصحيح مهم لزوج USDJPY تحديدًا: قيمة النقطة بالدولار لأزواج الين
+(XXX/JPY) ليست ثابتة $10 لكل لوت كما في EURUSD/GBPUSD/AUDUSD (لأن
+عملة التسعير Quote Currency هي الين وليست الدولار). قيمتها تتغير مع
+سعر الصرف نفسه، لذا تُحسب ديناميكيًا هنا بدل استخدام رقم ثابت خاطئ.
 """
 
 import os
@@ -26,29 +23,42 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 INITIAL_BALANCE = 200.0
-POLL_SECONDS = 30  # احترامًا لحدود الاستخدام العادل لـ API المجاني
+POLL_SECONDS = 30
 
-# إعدادات مطابقة تمامًا لنتيجة البحث المنهجي (param_sweep.py) السابقة
 STD_WINDOW = 20
 ENTRY_STD_MULTIPLIER = 2.5
 SL_PIPS = 4.0
 TP_PIPS = 6.0
-LOT_UNITS = 1000  # 0.01 لوت ثابت (حماية حساب صغير، كما اتفقنا سابقًا)
+LOT_UNITS = 1000
 LOT_SIZE = LOT_UNITS / 100_000  # = 0.01
 
+# is_jpy_pair: يُستخدم لحساب قيمة النقطة ديناميكيًا بدل رقم ثابت خاطئ
 ASSETS = {
-    "EURUSD": {"pip_size": 0.0001, "assumed_spread_pips": 0.8, "pip_value_per_lot": 10.0, "commission_per_lot": 7.0},
-    "GBPUSD": {"pip_size": 0.0001, "assumed_spread_pips": 1.2, "pip_value_per_lot": 10.0, "commission_per_lot": 7.0},
+    "EURUSD": {"pip_size": 0.0001, "assumed_spread_pips": 0.8, "commission_per_lot": 7.0, "is_jpy_pair": False},
+    "GBPUSD": {"pip_size": 0.0001, "assumed_spread_pips": 1.2, "commission_per_lot": 7.0, "is_jpy_pair": False},
+    "USDJPY": {"pip_size": 0.01,   "assumed_spread_pips": 1.0, "commission_per_lot": 7.0, "is_jpy_pair": True},
+    "AUDUSD": {"pip_size": 0.0001, "assumed_spread_pips": 1.5, "commission_per_lot": 7.0, "is_jpy_pair": False},
 }
 
-# ذاكرة محلية: نافذة أسعار متحركة لكل رمز + الصفقة المفتوحة إن وجدت
 price_windows = {sym: deque(maxlen=STD_WINDOW) for sym in ASSETS}
-open_positions = {}  # symbol -> dict(direction, entry, sl, tp, trade_id)
+open_positions = {}
+
+
+def pip_value_per_lot(symbol, current_price):
+    """
+    قيمة النقطة بالدولار لكل لوت قياسي (1.0 لوت = 100,000 وحدة):
+      - أزواج XXX/USD (اليورو، الإسترليني، الأسترالي): ثابتة $10 دائمًا
+      - أزواج XXX/JPY: تتغير مع السعر لأن عملة التسعير ليست الدولار
+        الصيغة: (pip_size × 100,000) ÷ السعر الحالي USDJPY
+    """
+    cfg = ASSETS[symbol]
+    if cfg["is_jpy_pair"]:
+        return (cfg["pip_size"] * 100_000) / current_price
+    return 10.0
 
 
 # ---------- قاعدة البيانات ----------
 def get_db_connection():
-    """اتصال جديد لكل عملية - لا نُبقي اتصالاً معلقًا (سبب مشاكل عدم استقرار سابقة)."""
     try:
         return psycopg2.connect(DATABASE_URL, connect_timeout=5)
     except Exception as e:
@@ -176,8 +186,6 @@ def send_telegram(text):
 
 # ---------- الأسعار الحقيقية ----------
 def get_live_prices():
-    """يجلب أسعار EURUSD/GBPUSD الحقيقية. عند فشل رمز، يُستبعد هذه الدورة
-    فقط (لا نستخدم أبدًا سعر أصل آخر كبديل - هذا كان سبب الكارثة سابقًا)."""
     url = "https://www.freeforexapi.com/api/live?pairs=" + ",".join(ASSETS.keys())
     prices = {}
     try:
@@ -188,7 +196,7 @@ def get_live_prices():
                 prices[symbol] = float(rates[symbol]["rate"])
     except Exception as e:
         log_event("PRICE_FETCH_ERROR", str(e))
-    return prices  # لا يحتوي إلا الرموز التي نجح جلبها فعليًا
+    return prices
 
 
 def mid_to_bid_ask(symbol, mid_price):
@@ -197,7 +205,7 @@ def mid_to_bid_ask(symbol, mid_price):
     return mid_price - half_spread, mid_price + half_spread
 
 
-# ---------- الاستراتيجية (مطابقة لـ market_scanner.py المُختبر) ----------
+# ---------- الاستراتيجية ----------
 def scan_signal(symbol, mid_price):
     window = price_windows[symbol]
     window.append(mid_price)
@@ -274,7 +282,8 @@ def try_close_trade(symbol, bid, ask):
     if direction == "SELL":
         pip_diff = -pip_diff
 
-    gross_pnl = pip_diff * cfg["pip_value_per_lot"] * LOT_SIZE
+    pv = pip_value_per_lot(symbol, exit_price)
+    gross_pnl = pip_diff * pv * LOT_SIZE
     commission = cfg["commission_per_lot"] * LOT_SIZE
     net_pnl = gross_pnl - commission
 
@@ -300,7 +309,7 @@ def main():
     cumulative = INITIAL_BALANCE + get_cumulative_net_pnl()
     log_event("SYSTEM_START", f"بدء التشغيل. الرصيد التراكمي: {cumulative:.2f}$")
     send_telegram(
-        f"🚀 <b>نظام Paper Trading ببيانات فوركس حقيقية بدأ العمل</b>\n"
+        f"🚀 <b>نظام Paper Trading ببيانات فوركس حقيقية بدأ العمل (v2)</b>\n"
         f"الأزواج: {', '.join(ASSETS.keys())}\n"
         f"💳 الرصيد التراكمي الحالي: {cumulative:.2f}$\n"
         f"⚠️ هذه صفقات محاكاة وهمية بأسعار حقيقية - وليست تداولاً فعليًا."
