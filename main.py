@@ -8,9 +8,7 @@ import sys
 from twisted.internet import asyncioreactor
 asyncioreactor.install()
 
-from twisted.internet import reactor
-from twisted.internet.defer import inlineCallbacks
-
+from twisted.internet import reactor, defer
 from config import Config
 from openapi_streamer import OpenApiStreamer
 from fix_executor import FixExecutor
@@ -26,7 +24,6 @@ cfg = Config()
 trading_halted = False
 
 def on_price_update(symbol_name, bid, ask):
-    """OpenAPI يرسل أسعار حقيقية"""
     global trading_halted
     if trading_halted:
         return
@@ -59,7 +56,6 @@ def on_price_update(symbol_name, bid, ask):
             logger.info(f"[Order Sent] {symbol_name} {'BUY' if is_buy else 'SELL'} - ClOrdID: {cl_ord_id}")
 
 def on_fix_execution(report):
-    """FIX منفذ أمر"""
     symbol_name = report.get("symbol_name", "UNKNOWN")
     position_id = report.get("position_id")
     
@@ -77,16 +73,13 @@ def on_fix_execution(report):
         openapi_streamer.amend_position_sl_tp(position_id, sl=None, tp=None)
 
 def on_fix_reject(cl_ord_id, reason):
-    """FIX رفض أمر"""
     logger.error(f"[FIX Reject] {cl_ord_id}: {reason}")
     telegram_notifier.notify_system_event(f"❌ رفض أمر: {reason}")
 
 def on_account_info(balance, equity):
-    """OpenAPI تحديث معلومات الحساب"""
     risk_manager.update_account_info(balance, equity)
 
 def on_reconcile(positions):
-    """OpenAPI استرجاع الصفقات المفتوحة"""
     logger.info(f"[Reconcile] {len(positions)} صفقة مفتوحة على الخادم")
     
     findings = startup_reconciler.run(positions)
@@ -104,7 +97,6 @@ def on_reconcile(positions):
         risk_manager.register_open_position(info)
 
 def on_emergency_close_all(reason):
-    """إغلاق طارئ لكل الصفقات"""
     global trading_halted
     trading_halted = True
     logger.critical(f"[Emergency] {reason}")
@@ -118,9 +110,8 @@ def on_emergency_close_all(reason):
             )
         risk_manager.unregister_position(position_id)
 
-@inlineCallbacks
+@defer.inlineCallbacks
 def start_system():
-    """بدء النظام الهجين"""
     global trading_halted
     trading_halted = False
     
@@ -132,11 +123,16 @@ def start_system():
     
     try:
         openapi_streamer.start()
-        yield reactor.callLater(2)
+        
+        d = defer.Deferred()
+        reactor.callLater(2, d.callback, None)
+        yield d
         
         if not cfg.dry_run:
             fix_executor.start()
-            yield reactor.callLater(2)
+            d = defer.Deferred()
+            reactor.callLater(2, d.callback, None)
+            yield d
         
         telegram_notifier.notify_system_event(
             f"🚀 نظام التداول بدأ\n"
