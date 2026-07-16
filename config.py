@@ -15,6 +15,12 @@ class TelegramConfig:
     def __init__(self):
         self.bot_token = _env("TELEGRAM_BOT_TOKEN")
         self.chat_id = _env("TELEGRAM_CHAT_ID")
+    
+    def as_dict(self):
+        return {
+            "bot_token": self.bot_token,
+            "chat_id": self.chat_id
+        }
 
 class OpenApiConfig:
     def __init__(self):
@@ -25,6 +31,16 @@ class OpenApiConfig:
         acc_id = _env("CTRADER_ACCOUNT_ID")
         self.account_id = int(acc_id) if acc_id else None
         self.use_live = _env("CTRADER_USE_LIVE", default="false").lower() == "true"
+    
+    def as_dict(self):
+        return {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token,
+            "account_id": self.account_id,
+            "use_live": self.use_live
+        }
 
 class FixConfig:
     def __init__(self):
@@ -37,6 +53,19 @@ class FixConfig:
         self.sender_sub_id = "TRADE"
         self.target_comp_id = "cServer"
         self.target_sub_id = "TRADE"
+    
+    def as_dict(self):
+        return {
+            "host": self.host,
+            "port": self.port,
+            "ssl": self.ssl,
+            "username": self.username,
+            "password": self.password,
+            "sender_comp_id": self.sender_comp_id,
+            "sender_sub_id": self.sender_sub_id,
+            "target_comp_id": self.target_comp_id,
+            "target_sub_id": self.target_sub_id
+        }
 
 class RiskConfig:
     def __init__(self):
@@ -44,6 +73,14 @@ class RiskConfig:
         self.max_concurrent_positions = int(_env("MAX_CONCURRENT_POSITIONS", default="2"))
         self.risk_per_trade_pct = float(_env("RISK_PER_TRADE_PCT", default="1.0"))
         self.target_symbols = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]
+    
+    def as_dict(self):
+        return {
+            "max_daily_drawdown_pct": self.max_daily_drawdown_pct,
+            "max_concurrent_positions": self.max_concurrent_positions,
+            "risk_per_trade_pct": self.risk_per_trade_pct,
+            "target_symbols": self.target_symbols
+        }
 
 class Config:
     def __init__(self):
