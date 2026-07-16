@@ -49,7 +49,7 @@ class Config:
     def __init__(self):
         self.dry_run = _env("DRY_RUN", default="true").lower() == "true"
         self.telegram = TelegramConfig()
-        self.openapi = OpenApiConfig()
+        self.open_api = OpenApiConfig()
         self.fix = FixConfig()
         self.risk = RiskConfig()
         self.monthly_counter_path = _env("MONTHLY_COUNTER_PATH", default="/data/monthly_counter.json")
