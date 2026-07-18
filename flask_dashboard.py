@@ -1,5 +1,5 @@
 """
-flask_dashboard.py
+flask_dashboard.py - Trading Bot Dashboard
 """
 
 import os
@@ -22,19 +22,21 @@ app = Flask(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DEBUG = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger("dashboard")
 
 def get_db():
     try:
         return psycopg2.connect(DATABASE_URL, connect_timeout=5)
     except Exception as e:
-        logger.error(f"[DB] {e}")
+        logger.error(f"[DB Connection Error] {e}")
         return None
 
 def query_trades(status=None, symbol=None, start_date=None, end_date=None, limit=100):
+    """جلب الصفقات من قاعدة البيانات"""
     conn = get_db()
     if not conn:
+        logger.warning("[DB] Connection failed")
         return []
     
     try:
@@ -59,26 +61,31 @@ def query_trades(status=None, symbol=None, start_date=None, end_date=None, limit
             params.append(limit)
             
             cur.execute(query, params)
-            return [dict(row) for row in cur.fetchall()]
+            result = [dict(row) for row in cur.fetchall()]
+            logger.info(f"[Trades Query] Found {len(result)} trades")
+            return result
     except Exception as e:
-        logger.error(f"[DB] {e}")
+        logger.error(f"[DB Query Error] {e}")
         return []
     finally:
         conn.close()
 
 def get_statistics():
+    """حساب الإحصائيات الشاملة"""
     conn = get_db()
     if not conn:
+        logger.warning("[DB] Connection failed for statistics")
         return {}
     
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # الصفقات المُغلقة فقط
             cur.execute("""
                 SELECT 
                     COUNT(*) as total_trades,
                     SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
                     SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
-                    SUM(net_pnl) as total_pnl,
+                    COALESCE(SUM(net_pnl), 0) as total_pnl,
                     AVG(net_pnl) as avg_pnl,
                     MAX(net_pnl) as max_win,
                     MIN(net_pnl) as max_loss
@@ -94,18 +101,30 @@ def get_statistics():
             else:
                 stats['win_rate'] = 0
             
+            stats['total_pnl'] = float(stats.get('total_pnl') or 0)
+            stats['winning_trades'] = stats.get('winning_trades') or 0
+            stats['losing_trades'] = stats.get('losing_trades') or 0
+            
+            # احسب الصفقات المفتوحة
             cur.execute("SELECT COUNT(*) as open_positions FROM live_paper_trades WHERE status = 'OPEN'")
             open_stats = dict(cur.fetchone() or {})
             stats['open_positions'] = open_stats.get('open_positions', 0)
             
+            logger.info(
+                f"[Stats] Total: {total}, Win: {stats['winning_trades']}, "
+                f"Loss: {stats['losing_trades']}, Rate: {stats['win_rate']}%, "
+                f"PnL: ${stats['total_pnl']:.2f}, Open: {stats['open_positions']}"
+            )
+            
             return stats
     except Exception as e:
-        logger.error(f"[DB] {e}")
+        logger.error(f"[DB Stats Error] {e}")
         return {}
     finally:
         conn.close()
 
 def get_daily_equity_curve(days=7):
+    """حساب منحنى الرصيد اليومي"""
     conn = get_db()
     if not conn:
         return []
@@ -129,14 +148,17 @@ def get_daily_equity_curve(days=7):
                     SUM(daily_sum) OVER (ORDER BY trade_date) as cumulative_pnl
                 FROM daily_pnl
             """)
-            return [dict(row) for row in cur.fetchall()]
+            result = [dict(row) for row in cur.fetchall()]
+            logger.info(f"[Equity Curve] {len(result)} days of data")
+            return result
     except Exception as e:
-        logger.error(f"[DB] {e}")
+        logger.error(f"[DB Equity Curve Error] {e}")
         return []
     finally:
         conn.close()
 
 def get_logs(log_type=None, start_date=None, end_date=None, limit=200):
+    """جلب السجلات"""
     conn = get_db()
     if not conn:
         return []
@@ -160,19 +182,23 @@ def get_logs(log_type=None, start_date=None, end_date=None, limit=200):
             params.append(limit)
             
             cur.execute(query, params)
-            return [dict(row) for row in cur.fetchall()]
+            result = [dict(row) for row in cur.fetchall()]
+            logger.info(f"[Logs Query] Found {len(result)} logs")
+            return result
     except Exception as e:
-        logger.error(f"[DB] {e}")
+        logger.error(f"[DB Logs Error] {e}")
         return []
     finally:
         conn.close()
 
 @app.route('/')
 def index():
+    """الصفحة الرئيسية"""
     return render_template('dashboard.html')
 
 @app.route('/api/trades', methods=['GET'])
 def api_trades():
+    """API لجلب الصفقات"""
     status = request.args.get('status')
     symbol = request.args.get('symbol')
     start_date = request.args.get('start_date')
@@ -186,24 +212,31 @@ def api_trades():
         if trade.get('closed_at'):
             trade['closed_at'] = trade['closed_at'].isoformat()
     
+    logger.info(f"[API] Returning {len(trades)} trades")
     return jsonify(trades)
 
 @app.route('/api/statistics', methods=['GET'])
 def api_statistics():
+    """API لجلب الإحصائيات"""
     stats = get_statistics()
+    logger.info(f"[API] Statistics returned")
     return jsonify(stats)
 
 @app.route('/api/equity-curve', methods=['GET'])
 def api_equity_curve():
+    """API لجلب منحنى الرصيد"""
     days = int(request.args.get('days', 7))
     curve = get_daily_equity_curve(days)
     for point in curve:
         if point.get('trade_date'):
             point['trade_date'] = point['trade_date'].isoformat()
+    
+    logger.info(f"[API] Equity curve returned")
     return jsonify(curve)
 
 @app.route('/api/logs', methods=['GET'])
 def api_logs():
+    """API لجلب السجلات"""
     log_type = request.args.get('log_type')
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
@@ -214,10 +247,12 @@ def api_logs():
         if log.get('created_at'):
             log['created_at'] = log['created_at'].isoformat()
     
+    logger.info(f"[API] Returning {len(logs)} logs")
     return jsonify(logs)
 
 @app.route('/api/export/trades', methods=['GET'])
 def export_trades_excel():
+    """تصدير الصفقات إلى Excel"""
     if not OPENPYXL_AVAILABLE:
         return jsonify({"error": "openpyxl not installed"}), 500
     
@@ -234,7 +269,7 @@ def export_trades_excel():
     ws = wb.active
     ws.title = "Trades"
     
-    headers = ["ID", "Symbol", "Direction", "Entry", "SL", "TP", "Status", "Exit", "Reason", "Gross PnL", "Commission", "Net PnL", "Open Time", "Close Time"]
+    headers = ["ID", "Symbol", "Direction", "Entry", "SL", "TP", "Status", "Exit", "Reason", "Gross PnL", "Commission", "Net PnL", "Strategy", "Open Time", "Close Time"]
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
     border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
@@ -260,6 +295,7 @@ def export_trades_excel():
             f"{trade.get('gross_pnl', 0):.2f}",
             f"{trade.get('commission', 0):.2f}",
             f"{trade.get('net_pnl', 0):.2f}",
+            trade.get('strategy', ''),
             str(trade.get('opened_at', '')),
             str(trade.get('closed_at', '')) if trade.get('closed_at') else "",
         ]
@@ -274,17 +310,19 @@ def export_trades_excel():
                 cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     
     ws.column_dimensions['A'].width = 8
-    for col in 'BCDEFGHIJKLMN':
+    for col in 'BCDEFGHIJKLMNO':
         ws.column_dimensions[col].width = 15
     
     output = BytesIO()
     wb.save(output)
     output.seek(0)
     
+    logger.info(f"[Export] Exported {len(trades)} trades to Excel")
     return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f'trades_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx')
 
 @app.route('/api/export/logs', methods=['GET'])
 def export_logs_excel():
+    """تصدير السجلات إلى Excel"""
     if not OPENPYXL_AVAILABLE:
         return jsonify({"error": "openpyxl not installed"}), 500
     
@@ -328,17 +366,20 @@ def export_logs_excel():
     wb.save(output)
     output.seek(0)
     
+    logger.info(f"[Export] Exported {len(logs)} logs to Excel")
     return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f'logs_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx')
 
 @app.errorhandler(404)
 def not_found(error):
+    logger.warning(f"[404] Page not found")
     return jsonify({"error": "Not found"}), 404
 
 @app.errorhandler(500)
 def server_error(error):
-    logger.error(f"Error: {error}")
+    logger.error(f"[500] Server error: {error}")
     return jsonify({"error": "Server error"}), 500
 
 if __name__ == '__main__':
-    logger.info("Starting Flask Dashboard...")
+    logger.info("🚀 Starting Flask Dashboard...")
+    logger.info(f"📊 Database: {DATABASE_URL[:20]}...")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=DEBUG, use_reloader=False)
