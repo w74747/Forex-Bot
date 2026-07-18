@@ -1,392 +1,37 @@
-"""
-main.py - Enhanced 3 Strategies Scalping Bot with Dynamic Capital Management
-"""
+# أضف هذا في main()
 
-import logging
-import time
-import random
-from collections import deque
-from datetime import datetime
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from ai_analyzer import DeepSeekAnalyzer
 
-from config import Config
-from capital_manager import CapitalManager
-from telegram_notifier import TelegramNotifier
-from monthly_tracker import MonthlyTracker
-
-logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
-logger = logging.getLogger("forex_bot")
-
-cfg = Config()
-
-PRICES = {
-    "EURUSD": 1.0850,
-    "GBPUSD": 1.2750,
-    "USDJPY": 149.50,
-    "AUDUSD": 0.6580
-}
-
-class PriceHistory:
-    def __init__(self, max_size=100):
-        self.prices = deque(maxlen=max_size)
-    
-    def add(self, price):
-        self.prices.append(price)
-    
-    def get_rsi(self, period=14):
-        if len(self.prices) < period:
-            return None
-        prices = list(self.prices)[-period:]
-        gains = sum(prices[i] - prices[i-1] for i in range(1, len(prices)) if prices[i] > prices[i-1])
-        losses = sum(prices[i-1] - prices[i] for i in range(1, len(prices)) if prices[i] < prices[i-1])
-        avg_gain = gains / period
-        avg_loss = losses / period
-        if avg_loss == 0:
-            return 100 if avg_gain > 0 else 0
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
-    
-    def get_ema(self, period):
-        if len(self.prices) < period:
-            return None
-        prices = list(self.prices)[-period:]
-        return sum(prices) / len(prices)
-    
-    def get_macd(self):
-        ema12 = self.get_ema(12)
-        ema26 = self.get_ema(26)
-        if ema12 is None or ema26 is None:
-            return None, None
-        return ema12 - ema26, ema12 - ema26
-    
-    def get_stochastic(self, period=5):
-        if len(self.prices) < period:
-            return None
-        prices = list(self.prices)[-period:]
-        lowest = min(prices)
-        highest = max(prices)
-        if highest == lowest:
-            return 50
-        return 100 * (prices[-1] - lowest) / (highest - lowest)
-    
-    def get_atr(self, period=14):
-        if len(self.prices) < period + 1:
-            return None
-        prices = list(self.prices)[-(period+1):]
-        tr_values = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
-        return sum(tr_values) / len(tr_values) if tr_values else None
-
-def get_db():
-    try:
-        return psycopg2.connect(cfg.database_url, connect_timeout=5)
-    except Exception as e:
-        logger.error(f"[DB Error] {e}")
-        return None
-
-def generate_prices():
-    prices = {}
-    for symbol, base_price in PRICES.items():
-        change = random.uniform(-0.0015, 0.0015)
-        bid = base_price + change
-        ask = bid + 0.0005
-        prices[symbol] = {"bid": bid, "ask": ask}
-    return prices
-
-def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker):
-    """إغلاق صفقة"""
+def get_trades_last_30min(conn):
+    """جلب الصفقات آخر 30 دقيقة"""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM live_paper_trades WHERE id = %s", (trade_id,))
-            trade = cur.fetchone()
-            
-            if not trade:
-                return False
-            
-            entry_price = float(trade['entry_price'])
-            is_buy = trade['direction'] == 'BUY'
-            
-            # حساب صحيح للأرباح مع الـ lot size الفعلي
-            if is_buy:
-                price_diff = exit_price - entry_price
-            else:
-                price_diff = entry_price - exit_price
-            
-            gross_pnl = price_diff * lot_size * 100000
-            commission = abs(gross_pnl) * 0.0001
-            net_pnl = gross_pnl - commission
-            
             cur.execute("""
-                UPDATE live_paper_trades 
-                SET status = 'CLOSED', 
-                    exit_price = %s, 
-                    exit_reason = %s, 
-                    gross_pnl = %s,
-                    commission = %s,
-                    net_pnl = %s,
-                    lot_size = %s,
-                    closed_at = NOW()
-                WHERE id = %s
-            """, (exit_price, exit_reason, gross_pnl, commission, net_pnl, lot_size, trade_id))
-            
-            conn.commit()
-            
-            pnl_str = f"+${net_pnl:.2f}" if net_pnl > 0 else f"-${abs(net_pnl):.2f}"
-            strategy = trade['strategy'] if trade['strategy'] else 'UNKNOWN'
-            logger.info(
-                f"[{strategy}] CLOSE #{trade_id} {trade['symbol']} "
-                f"{exit_reason} @ {exit_price:.5f} | {pnl_str}"
-            )
-            
-            # تسجيل في العداد الشهري
-            try:
-                monthly_tracker.record_trade(gross_pnl, commission)
-            except:
-                pass
-            
-            # إرسال إخطار
-            try:
-                current_balance = capital_manager.get_current_balance()
-                monthly_pnl = capital_manager.balance_reader.get_monthly_pnl()
-                
-                telegram_notifier.notify_trade_close(
-                    trade_id=trade_id,
-                    strategy=strategy,
-                    symbol=trade['symbol'],
-                    direction=trade['direction'],
-                    entry_price=entry_price,
-                    exit_price=exit_price,
-                    exit_reason=exit_reason,
-                    gross_pnl=gross_pnl,
-                    net_pnl=net_pnl,
-                    current_balance=current_balance,
-                    monthly_pnl=monthly_pnl
-                )
-            except:
-                pass
-            
-            return True
-    except Exception as e:
-        logger.error(f"[Close Error] {e}")
-        return False
-
-def check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker):
-    """التحقق من الصفقات المفتوحة"""
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM live_paper_trades WHERE status = 'OPEN'")
-            open_trades = cur.fetchall()
-        
-        for trade in open_trades:
-            symbol = trade['symbol']
-            trade_id = trade['id']
-            
-            if symbol not in prices:
-                continue
-            
-            bid = prices[symbol]['bid']
-            ask = prices[symbol]['ask']
-            mid = (bid + ask) / 2
-            
-            sl_price = float(trade['sl_price'])
-            tp_price = float(trade['tp_price'])
-            is_buy = trade['direction'] == 'BUY'
-            entry_price = float(trade['entry_price'])
-            
-            lot_size = capital_manager.get_optimal_lot_size(entry_price, trade['strategy'])
-            
-            should_close = False
-            exit_reason = None
-            exit_price = None
-            
-            if is_buy:
-                if mid >= tp_price:
-                    should_close = True
-                    exit_reason = "TAKE_PROFIT"
-                    exit_price = tp_price
-                elif mid <= sl_price:
-                    should_close = True
-                    exit_reason = "STOP_LOSS"
-                    exit_price = sl_price
-            else:
-                if mid <= tp_price:
-                    should_close = True
-                    exit_reason = "TAKE_PROFIT"
-                    exit_price = tp_price
-                elif mid >= sl_price:
-                    should_close = True
-                    exit_reason = "STOP_LOSS"
-                    exit_price = sl_price
-            
-            if should_close:
-                close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker)
-    
-    except Exception as e:
-        logger.error(f"[Check Positions Error] {e}")
-
-def strategy_rsi_ema_macd(symbol, bid, ask, price_history):
-    mid = (bid + ask) / 2
-    price_history[symbol].add(mid)
-    
-    rsi = price_history[symbol].get_rsi(14)
-    ema5 = price_history[symbol].get_ema(5)
-    ema10 = price_history[symbol].get_ema(10)
-    macd, _ = price_history[symbol].get_macd()
-    
-    if rsi is None or ema5 is None or ema10 is None or macd is None:
-        return None
-    
-    if rsi < 30 and ema5 > ema10 and macd > 0:
-        return "BUY"
-    elif rsi > 70 and ema5 < ema10 and macd < 0:
-        return "SELL"
-    
-    return None
-
-def strategy_bb_stoch_volume(symbol, bid, ask, price_history):
-    mid = (bid + ask) / 2
-    price_history[symbol].add(mid)
-    
-    stoch = price_history[symbol].get_stochastic(5)
-    
-    if stoch is None:
-        return None
-    
-    if stoch < 20:
-        return "BUY"
-    elif stoch > 80:
-        return "SELL"
-    
-    return None
-
-def strategy_ema_cross_atr(symbol, bid, ask, price_history):
-    mid = (bid + ask) / 2
-    price_history[symbol].add(mid)
-    
-    ema5 = price_history[symbol].get_ema(5)
-    ema10 = price_history[symbol].get_ema(10)
-    ema20 = price_history[symbol].get_ema(20)
-    
-    if ema5 is None or ema10 is None or ema20 is None:
-        return None
-    
-    if ema5 > ema10 > ema20:
-        return "BUY"
-    elif ema5 < ema10 < ema20:
-        return "SELL"
-    
-    return None
-
-def calculate_dynamic_tp_sl(mid_price, is_buy, atr_value):
-    if atr_value is None:
-        atr_value = 0.0005
-    
-    sl_distance = atr_value * 1.5
-    tp_distance = atr_value * 2.5
-    
-    if is_buy:
-        sl_price = mid_price - sl_distance
-        tp_price = mid_price + tp_distance
-    else:
-        sl_price = mid_price + sl_distance
-        tp_price = mid_price - tp_distance
-    
-    return sl_price, tp_price
-
-def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn, capital_manager, atr_value=None):
-    """فتح صفقة"""
-    is_buy = direction == "BUY"
-    sl_price, tp_price = calculate_dynamic_tp_sl(entry_price, is_buy, atr_value)
-    lot_size = capital_manager.get_optimal_lot_size(entry_price, strategy)
-    
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO live_paper_trades 
-                (symbol, direction, entry_price, sl_price, tp_price, status, strategy, lot_size, opened_at)
-                VALUES (%s, %s, %s, %s, %s, 'OPEN', %s, %s, NOW())
-                RETURNING id
-            """, (symbol, direction, entry_price, sl_price, tp_price, strategy, lot_size))
-            
-            trade_id = cur.fetchone()[0]
-            conn.commit()
-            
-            logger.info(
-                f"[{strategy}] OPEN #{trade_id} {symbol} {direction} "
-                f"{lot_size} lots @ {entry_price:.5f} TP:{tp_price:.5f} SL:{sl_price:.5f}"
-            )
-            
-            # إرسال إخطار
-            try:
-                telegram_notifier.notify_trade_open(
-                    trade_id=trade_id,
-                    strategy=strategy,
-                    symbol=symbol,
-                    direction=direction,
-                    entry_price=entry_price,
-                    lot_size=lot_size,
-                    sl_price=sl_price,
-                    tp_price=tp_price
-                )
-            except:
-                pass
-    
-    except Exception as e:
-        logger.error(f"[Open Trade Error] {e}")
-
-def send_periodic_summary(capital_manager, telegram_notifier, monthly_tracker, last_summary_time, trades_today):
-    """إرسال ملخصات دورية"""
-    try:
-        now = datetime.now()
-        
-        # ملخص ساعي
-        if (now - last_summary_time[0]).total_seconds() >= 3600:
-            account_stats = capital_manager.get_account_stats()
-            
-            telegram_notifier.notify_hourly_summary(
-                account_stats=account_stats,
-                trades_today=trades_today[0]
-            )
-            
-            last_summary_time[0] = now
-            trades_today[0] = 0
-    
-    except Exception as e:
-        logger.error(f"[Periodic Summary] {e}")
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END) as losses,
+                    COALESCE(SUM(net_pnl), 0) as pnl
+                FROM live_paper_trades 
+                WHERE status = 'CLOSED'
+                AND closed_at >= NOW() - INTERVAL '30 minutes'
+            """)
+            result = cur.fetchone()
+            return dict(result) if result else {
+                'total': 0, 'wins': 0, 'losses': 0, 'pnl': 0
+            }
+    except:
+        return {'total': 0, 'wins': 0, 'losses': 0, 'pnl': 0}
 
 def main():
-    logger.info("="*60)
-    logger.info("🚀 Enhanced Multi-Strategy Scalping Bot")
-    logger.info(f"📊 Mode: {'LIVE 🔴' if not cfg.dry_run else 'PAPER TRADING 📝'}")
-    logger.info(f"💰 Starting Balance: ${cfg.capital.starting_balance}")
-    logger.info(f"⚡ Risk Per Trade: {cfg.capital.risk_per_trade_pct}%")
-    logger.info("="*60)
+    # ... كود البداية ...
     
-    capital_manager = CapitalManager(
-        database_url=cfg.database_url,
-        starting_balance=cfg.capital.starting_balance,
-        risk_per_trade=cfg.capital.risk_per_trade_pct
-    )
+    # إضافة DeepSeek
+    deepseek_key = _env("DEEPSEEK_API_KEY")
+    ai_analyzer = DeepSeekAnalyzer(deepseek_key, cfg.database_url) if deepseek_key else None
     
-    telegram_notifier = TelegramNotifier(cfg.telegram)
-    monthly_tracker = MonthlyTracker()
-    price_history = {symbol: PriceHistory(100) for symbol in cfg.risk.target_symbols}
-    
-    try:
-        mode = "LIVE 🔴" if not cfg.dry_run else "PAPER TRADING 📝"
-        telegram_notifier.notify_system_event(
-            f"🚀 Bot Started\n"
-            f"📌 3 Improved Strategies\n"
-            f"💰 Balance: ${cfg.capital.starting_balance}\n"
-            f"🔒 Mode: {mode}"
-        )
-    except:
-        pass
-    
-    logger.info("[System] Ready ✅")
-    
-    last_summary_time = [datetime.now()]
-    trades_today = [0]
+    last_report_time = [datetime.now()]
+    last_ai_analysis_time = [datetime.now()]
     
     try:
         iteration = 0
@@ -394,64 +39,53 @@ def main():
             iteration += 1
             prices = generate_prices()
             
-            # إرسال ملخصات دورية
-            if iteration % 120 == 0:
-                send_periodic_summary(capital_manager, telegram_notifier, monthly_tracker, last_summary_time, trades_today)
+            now = datetime.now()
             
-            conn = get_db()
-            if conn:
-                check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker)
-            
-            for symbol in cfg.risk.target_symbols:
-                if symbol not in prices:
-                    continue
-                
-                bid = prices[symbol]['bid']
-                ask = prices[symbol]['ask']
-                mid = (bid + ask) / 2
-                
-                if bid > 0 and ask > 0:
-                    # Strategy 1
-                    signal1 = strategy_rsi_ema_macd(symbol, bid, ask, price_history)
-                    if signal1:
-                        atr1 = price_history[symbol].get_atr(14)
-                        open_trade(symbol, signal1, mid, "RSI_EMA_MACD", telegram_notifier, conn, capital_manager, atr1)
-                        trades_today[0] += 1
+            # تقرير مختصر كل 30 دقيقة
+            if (now - last_report_time[0]).total_seconds() >= 1800:
+                try:
+                    conn = get_db()
+                    if conn:
+                        trades_30min = get_trades_last_30min(conn)
+                        account_stats = capital_manager.get_account_stats()
+                        monthly_summary = monthly_tracker.get_summary()
+                        
+                        telegram_notifier.notify_compact_report(
+                            account_stats=account_stats,
+                            trades_data={
+                                'total_trades': trades_30min['total'],
+                                'wins': trades_30min['wins'],
+                                'losses': trades_30min['losses'],
+                                'pnl_30min': trades_30min['pnl']
+                            },
+                            monthly_summary=monthly_summary
+                        )
+                        
+                        conn.close()
                     
-                    # Strategy 2
-                    signal2 = strategy_bb_stoch_volume(symbol, bid, ask, price_history)
-                    if signal2:
-                        atr2 = price_history[symbol].get_atr(14)
-                        open_trade(symbol, signal2, mid, "BB_STOCH", telegram_notifier, conn, capital_manager, atr2)
-                        trades_today[0] += 1
+                    last_report_time[0] = now
+                except Exception as e:
+                    logger.error(f"[Report] {e}")
+            
+            # تحليل AI كل 30 دقيقة أيضاً (يمكن أن يكون في وقت مختلف)
+            if (now - last_ai_analysis_time[0]).total_seconds() >= 1800 and ai_analyzer:
+                try:
+                    # تحليل الأداء
+                    performance = ai_analyzer.analyze_performance()
                     
-                    # Strategy 3
-                    signal3 = strategy_ema_cross_atr(symbol, bid, ask, price_history)
-                    if signal3:
-                        atr3 = price_history[symbol].get_atr(14)
-                        open_trade(symbol, signal3, mid, "EMA_ATR", telegram_notifier, conn, capital_manager, atr3)
-                        trades_today[0] += 1
+                    # مراجعة الكود
+                    code_review = ai_analyzer.analyze_code()
+                    
+                    if performance and code_review:
+                        telegram_notifier.notify_ai_analysis(
+                            performance_analysis=performance['analysis'],
+                            code_review=code_review['analysis']
+                        )
+                        
+                        logger.info("[AI Analysis] Completed successfully")
+                    
+                    last_ai_analysis_time[0] = now
+                except Exception as e:
+                    logger.error(f"[AI Analysis] {e}")
             
-            if conn:
-                conn.close()
-            
-            if iteration % 120 == 0:
-                logger.info(f"[System] Running... Iteration {iteration}")
-            
-            time.sleep(30)
-    
-    except KeyboardInterrupt:
-        logger.info("⏹️ Stopping...")
-        try:
-            telegram_notifier.notify_system_event("⏹️ Bot Stopped")
-        except:
-            pass
-    except Exception as e:
-        logger.critical(f"[Fatal Error] {e}")
-        try:
-            telegram_notifier.notify_system_event(f"💥 Error: {e}")
-        except:
-            pass
-
-if __name__ == '__main__':
-    main()
+            # ... باقي الكود ...
