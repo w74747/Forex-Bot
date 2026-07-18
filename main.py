@@ -1,11 +1,10 @@
 """
-main.py - 3 Scalping Strategies (RSI+EMA, BB+Stoch, EMA Cross)
+main.py - 3 Scalping Strategies (Fixed)
 """
 
 import logging
 import time
 import random
-from market_scanner import MarketScanner, ScannerConfig
 from risk_manager import RiskManager
 from telegram_notifier import TelegramNotifier
 from config import Config
@@ -25,12 +24,6 @@ PRICES = {
     "AUDUSD": 0.6580
 }
 
-STRATEGY_CAPITAL = {
-    "RSI_EMA": 333.33,
-    "BB_STOCH": 333.33,
-    "EMA_CROSS": 333.34
-}
-
 class PriceHistory:
     def __init__(self, max_size=50):
         self.prices = deque(maxlen=max_size)
@@ -44,6 +37,8 @@ class PriceHistory:
         prices = list(self.prices)[-period:]
         gains = sum(prices[i] - prices[i-1] for i in range(1, len(prices)) if prices[i] > prices[i-1])
         losses = sum(prices[i-1] - prices[i] for i in range(1, len(prices)) if prices[i] < prices[i-1])
+        if period == 0:
+            return 50
         avg_gain = gains / period
         avg_loss = losses / period
         if avg_loss == 0:
@@ -119,7 +114,7 @@ def close_trade(trade_id, exit_price, exit_reason, conn):
             conn.commit()
             
             pnl_str = f"+${net_pnl:.2f}" if net_pnl > 0 else f"-${abs(net_pnl):.2f}"
-            strategy = trade['strategy']
+            strategy = trade['strategy'] if trade['strategy'] else 'UNKNOWN'
             logger.info(
                 f"[{strategy}] CLOSE #{trade_id} {trade['symbol']} "
                 f"{exit_reason} @ {exit_price:.5f} | {pnl_str}"
@@ -139,6 +134,8 @@ def check_open_positions(prices, conn):
         
         for trade in open_trades:
             symbol = trade['symbol']
+            trade_id = trade['id']
+            
             if symbol not in prices:
                 continue
             
@@ -179,7 +176,7 @@ def check_open_positions(prices, conn):
     except Exception as e:
         logger.error(f"[Check Positions Error] {e}")
 
-def strategy_rsi_ema(symbol, bid, ask, price_history, telegram_notifier, conn):
+def strategy_rsi_ema(symbol, bid, ask, price_history):
     """استراتيجية RSI + EMA"""
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
@@ -191,15 +188,14 @@ def strategy_rsi_ema(symbol, bid, ask, price_history, telegram_notifier, conn):
     if rsi is None or ema5 is None or ema10 is None:
         return None
     
-    signal = None
     if rsi < 30 and ema5 > ema10:
-        signal = ("BUY", rsi, ema5, ema10)
+        return "BUY"
     elif rsi > 70 and ema5 < ema10:
-        signal = ("SELL", rsi, ema5, ema10)
+        return "SELL"
     
-    return signal
+    return None
 
-def strategy_bb_stoch(symbol, bid, ask, price_history, telegram_notifier, conn):
+def strategy_bb_stoch(symbol, bid, ask, price_history):
     """استراتيجية Bollinger Bands + Stochastic"""
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
@@ -209,15 +205,14 @@ def strategy_bb_stoch(symbol, bid, ask, price_history, telegram_notifier, conn):
     if stoch is None:
         return None
     
-    signal = None
     if stoch < 20:
-        signal = ("BUY", stoch)
+        return "BUY"
     elif stoch > 80:
-        signal = ("SELL", stoch)
+        return "SELL"
     
-    return signal
+    return None
 
-def strategy_ema_cross(symbol, bid, ask, price_history, telegram_notifier, conn):
+def strategy_ema_cross(symbol, bid, ask, price_history):
     """استراتيجية EMA Crossover"""
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
@@ -229,13 +224,12 @@ def strategy_ema_cross(symbol, bid, ask, price_history, telegram_notifier, conn)
     if ema5 is None or ema10 is None or ema20 is None:
         return None
     
-    signal = None
     if ema5 > ema10 > ema20:
-        signal = ("BUY", ema5, ema10, ema20)
+        return "BUY"
     elif ema5 < ema10 < ema20:
-        signal = ("SELL", ema5, ema10, ema20)
+        return "SELL"
     
-    return signal
+    return None
 
 def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn):
     """فتح صفقة جديدة"""
@@ -272,11 +266,9 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
             try:
                 telegram_notifier.notify_system_event(
                     f"✅ Trade #{trade_id}\n"
-                    f"📌 Strategy: {strategy_name}\n"
+                    f"📌 {strategy_name}\n"
                     f"💱 {symbol} {direction}\n"
-                    f"💹 Entry: {entry_price:.5f}\n"
-                    f"🎯 TP: {tp_price:.5f}\n"
-                    f"🛑 SL: {sl_price:.5f}"
+                    f"💹 @ {entry_price:.5f}"
                 )
             except:
                 pass
@@ -291,7 +283,7 @@ def main():
     logger.info("="*60)
     logger.info("🚀 Multi-Strategy Scalping Bot")
     logger.info("📊 3 Strategies Running in Parallel")
-    logger.info(f"💰 Capital per Strategy: ${STRATEGY_CAPITAL['RSI_EMA']:.2f}")
+    logger.info("💰 Capital per Strategy: $333.33")
     logger.info("="*60)
     
     risk_manager = RiskManager(cfg.risk, on_emergency_close_all=on_emergency_close_all)
@@ -302,9 +294,9 @@ def main():
     try:
         telegram_notifier.notify_system_event(
             "🚀 Multi-Strategy Bot Started\n"
-            "📌 RSI + EMA: $333.33\n"
-            "📌 Bollinger + Stochastic: $333.33\n"
-            "📌 EMA Crossover: $333.34"
+            "📌 RSI + EMA\n"
+            "📌 Bollinger + Stochastic\n"
+            "📌 EMA Crossover"
         )
     except:
         pass
@@ -331,17 +323,17 @@ def main():
                 
                 if bid > 0 and ask > 0:
                     if risk_manager.can_open_new_position():
-                        signal1 = strategy_rsi_ema(symbol, bid, ask, price_history, telegram_notifier, conn)
-                        if signal1 and signal1[0]:
-                            open_trade(symbol, signal1[0], mid, "RSI_EMA", telegram_notifier, conn)
+                        signal1 = strategy_rsi_ema(symbol, bid, ask, price_history)
+                        if signal1:
+                            open_trade(symbol, signal1, mid, "RSI_EMA", telegram_notifier, conn)
                         
-                        signal2 = strategy_bb_stoch(symbol, bid, ask, price_history, telegram_notifier, conn)
-                        if signal2 and signal2[0]:
-                            open_trade(symbol, signal2[0], mid, "BB_STOCH", telegram_notifier, conn)
+                        signal2 = strategy_bb_stoch(symbol, bid, ask, price_history)
+                        if signal2:
+                            open_trade(symbol, signal2, mid, "BB_STOCH", telegram_notifier, conn)
                         
-                        signal3 = strategy_ema_cross(symbol, bid, ask, price_history, telegram_notifier, conn)
-                        if signal3 and signal3[0]:
-                            open_trade(symbol, signal3[0], mid, "EMA_CROSS", telegram_notifier, conn)
+                        signal3 = strategy_ema_cross(symbol, bid, ask, price_history)
+                        if signal3:
+                            open_trade(symbol, signal3, mid, "EMA_CROSS", telegram_notifier, conn)
             
             if conn:
                 conn.close()
@@ -354,7 +346,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("⏹️ Stopping...")
         try:
-            telegram_notifier.notify_system_event("⏹️ Multi-Strategy Bot Stopped")
+            telegram_notifier.notify_system_event("⏹️ Bot Stopped")
         except:
             pass
     except Exception as e:
