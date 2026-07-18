@@ -15,11 +15,13 @@ class TelegramConfig:
     def __init__(self):
         self.bot_token = _env("TELEGRAM_BOT_TOKEN")
         self.chat_id = _env("TELEGRAM_CHAT_ID")
+        self.enabled = bool(self.bot_token and self.chat_id)
     
     def as_dict(self):
         return {
             "bot_token": self.bot_token,
-            "chat_id": self.chat_id
+            "chat_id": self.chat_id,
+            "enabled": self.enabled
         }
 
 class OpenApiConfig:
@@ -73,13 +75,17 @@ class RiskConfig:
         self.max_concurrent_positions = int(_env("MAX_CONCURRENT_POSITIONS", default="2"))
         self.risk_per_trade_pct = float(_env("RISK_PER_TRADE_PCT", default="1.0"))
         self.target_symbols = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD"]
+        self.use_fixed_volume = _env("USE_FIXED_VOLUME", default="true").lower() == "true"
+        self.trade_volume_units = int(_env("TRADE_VOLUME_UNITS", default="1000"))
     
     def as_dict(self):
         return {
             "max_daily_drawdown_pct": self.max_daily_drawdown_pct,
             "max_concurrent_positions": self.max_concurrent_positions,
             "risk_per_trade_pct": self.risk_per_trade_pct,
-            "target_symbols": self.target_symbols
+            "target_symbols": self.target_symbols,
+            "use_fixed_volume": self.use_fixed_volume,
+            "trade_volume_units": self.trade_volume_units
         }
 
 class Config:
