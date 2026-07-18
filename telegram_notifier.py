@@ -16,9 +16,8 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
     
     def send_message(self, text):
-        """إرسال رسالة نصية"""
+        """إرسال رسالة"""
         if not self.enabled:
-            logger.warning("[Telegram] Notifications disabled")
             return False
         
         try:
@@ -29,132 +28,150 @@ class TelegramNotifier:
                 "parse_mode": "HTML"
             }
             response = requests.post(url, json=data, timeout=10)
-            if response.status_code == 200:
-                logger.info("[Telegram] Message sent")
-                return True
-            else:
-                logger.error(f"[Telegram] Error: {response.text}")
-                return False
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"[Telegram] Send error: {e}")
             return False
     
     def notify_trade_open(self, trade_id, strategy, symbol, direction, entry_price, lot_size, sl_price, tp_price):
-        """إخطار عند فتح صفقة"""
-        direction_emoji = "🟢" if direction == "BUY" else "🔴"
+        """إخطار فتح صفقة"""
+        direction_emoji = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
         
         text = f"""
-<b>📊 صفقة جديدة - فتح</b>
+<b>📊 صفقة جديدة</b>
 
 <b>ID:</b> #{trade_id}
-<b>استراتيجية:</b> {strategy}
+<b>الاستراتيجية:</b> {strategy}
 <b>الزوج:</b> {symbol}
-<b>الاتجاه:</b> {direction_emoji} {direction}
-<b>الحجم:</b> {lot_size} لوت
+<b>الاتجاه:</b> {direction_emoji}
+<b>الحجم:</b> <u>{lot_size} لوت</u>
 <b>نقطة الدخول:</b> {entry_price:.5f}
 <b>🎯 TP:</b> {tp_price:.5f}
 <b>🛑 SL:</b> {sl_price:.5f}
 
-<b>الوقت:</b> {datetime.now().strftime('%H:%M:%S')}
+⏰ {datetime.now().strftime('%H:%M:%S')}
 """
         self.send_message(text)
     
-    def notify_trade_close(self, trade_id, strategy, symbol, direction, entry_price, exit_price, exit_reason, net_pnl):
-        """إخطار عند إغلاق صفقة"""
+    def notify_trade_close(self, trade_id, strategy, symbol, direction, entry_price, exit_price, 
+                          exit_reason, gross_pnl, net_pnl, current_balance, monthly_pnl):
+        """إخطار إغلاق صفقة مع الأرباح"""
         direction_emoji = "🟢" if direction == "BUY" else "🔴"
         profit_emoji = "✅" if net_pnl > 0 else "❌"
-        pnl_color = "52B788" if net_pnl > 0 else "D62828"
+        pnl_indicator = "📈" if net_pnl > 0 else "📉"
         
         text = f"""
 <b>📊 صفقة مُغلقة</b>
 
 <b>ID:</b> #{trade_id}
-<b>استراتيجية:</b> {strategy}
-<b>الزوج:</b> {symbol}
-<b>الاتجاه:</b> {direction_emoji} {direction}
+<b>الاستراتيجية:</b> {strategy}
+<b>الزوج:</b> {symbol} {direction_emoji}
+━━━━━━━━━━━━━━━━━━━━━━
 <b>نقطة الدخول:</b> {entry_price:.5f}
 <b>نقطة الخروج:</b> {exit_price:.5f}
 <b>السبب:</b> {exit_reason}
+━━━━━━━━━━━━━━━━━━━━━━
+<b>الربح الإجمالي:</b> ${gross_pnl:+.2f}
+<b>العمولة:</b> -${abs(net_pnl - gross_pnl):.2f}
+<b>{pnl_indicator} الربح النهائي:</b> <u>{profit_emoji} ${net_pnl:+.2f}</u>
+━━━━━━━━━━━━━━━━━━━━━━
+<b>💰 الرصيد الحالي:</b> ${current_balance:.2f}
+<b>📈 الربح الشهري:</b> ${monthly_pnl:+.2f}
 
-<b>الربح/الخسارة:</b> <u>{profit_emoji} ${net_pnl:+.2f}</u>
-
-<b>الوقت:</b> {datetime.now().strftime('%H:%M:%S')}
+⏰ {datetime.now().strftime('%H:%M:%S')}
 """
         self.send_message(text)
     
-    def notify_daily_summary(self, total_trades, winning_trades, losing_trades, total_pnl, win_rate, balance):
-        """إخطار بملخص اليومي"""
-        win_pct = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-        pnl_emoji = "📈" if total_pnl > 0 else "📉"
+    def notify_hourly_summary(self, account_stats, trades_today):
+        """ملخص ساعي"""
+        balance = account_stats['current_balance']
+        monthly = account_stats['monthly_pnl']
+        unrealized = account_stats['unrealized_pnl']
+        
+        monthly_emoji = "📈" if monthly > 0 else "📉"
         
         text = f"""
-<b>📈 ملخص اليومي</b>
+<b>⏰ ملخص ساعي</b>
 
-<b>إجمالي الصفقات:</b> {total_trades}
-<b>✅ صفقات رابحة:</b> {winning_trades} ({win_pct:.1f}%)
-<b>❌ صفقات خاسرة:</b> {losing_trades}
-
-<b>الربح/الخسارة اليومي:</b> {pnl_emoji} <u>${total_pnl:+.2f}</u>
 <b>💰 الرصيد:</b> ${balance:.2f}
+<b>المبلغ المستثمر:</b> ${account_stats['starting_balance']:.2f}
+━━━━━━━━━━━━━━━━━━━━━━
+<b>{monthly_emoji} الربح الشهري:</b> <u>${monthly:+.2f}</u>
+<b>📊 الأرباح المعلقة:</b> ${unrealized:+.2f}
+<b>💹 الإجمالي:</b> <u>${balance + unrealized:+.2f}</u>
+━━━━━━━━━━━━━━━━━━━━━━
+<b>الصفقات اليوم:</b> {trades_today}
 
-<b>الوقت:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
         self.send_message(text)
     
-    def notify_monthly_summary(self, month, total_trades, winning_trades, losing_trades, total_pnl, win_rate, balance):
-        """إخطار بملخص شهري"""
-        win_pct = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-        pnl_emoji = "📈" if total_pnl > 0 else "📉"
+    def notify_daily_summary(self, account_stats, total_trades, winning_trades, losing_trades):
+        """ملخص يومي"""
+        balance = account_stats['current_balance']
+        monthly = account_stats['monthly_pnl']
+        
+        if total_trades > 0:
+            win_rate = (winning_trades / total_trades) * 100
+        else:
+            win_rate = 0
+        
+        monthly_emoji = "📈" if monthly > 0 else "📉"
         
         text = f"""
-<b>🎯 ملخص شهري - {month}</b>
+<b>📊 ملخص يومي</b>
 
-<b>إجمالي الصفقات:</b> {total_trades}
-<b>✅ صفقات رابحة:</b> {winning_trades} ({win_pct:.1f}%)
+<b>📊 إجمالي الصفقات:</b> {total_trades}
+<b>✅ صفقات رابحة:</b> {winning_trades} ({win_rate:.1f}%)
 <b>❌ صفقات خاسرة:</b> {losing_trades}
+━━━━━━━━━━━━━━━━━━━━━━
+<b>💰 الرصيد:</b> ${balance:.2f}
+<b>{monthly_emoji} الربح الشهري:</b> <u>${monthly:+.2f}</u>
+━━━━━━━━━━━━━━━━━━━━━━
+<b>معدل النجاح:</b> {win_rate:.1f}%
 
-<b>الربح/الخسارة الشهري:</b> {pnl_emoji} <u>${total_pnl:+.2f}</u>
-<b>معدل النجاح:</b> {win_rate:.2f}%
+📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        self.send_message(text)
+    
+    def notify_monthly_end(self, month, account_stats, total_trades, winning_trades, losing_trades):
+        """ملخص نهاية الشهر"""
+        balance = account_stats['current_balance']
+        monthly = account_stats['monthly_pnl']
+        
+        if total_trades > 0:
+            win_rate = (winning_trades / total_trades) * 100
+        else:
+            win_rate = 0
+        
+        monthly_emoji = "📈" if monthly > 0 else "📉"
+        roi = ((balance - account_stats['starting_balance']) / account_stats['starting_balance']) * 100
+        
+        text = f"""
+<b>🎯 ملخص نهاية الشهر - {month}</b>
+
+<b>📊 إجمالي الصفقات:</b> {total_trades}
+<b>✅ صفقات رابحة:</b> {winning_trades} ({win_rate:.1f}%)
+<b>❌ صفقات خاسرة:</b> {losing_trades}
+━━━━━━━━━━━━━━━━━━━━━━
+<b>💰 الرصيد الابتدائي:</b> ${account_stats['starting_balance']:.2f}
 <b>💰 الرصيد النهائي:</b> ${balance:.2f}
+<b>{monthly_emoji} الربح الشهري:</b> <u>${monthly:+.2f}</u>
+━━━━━━━━━━━━━━━━━━━━━━
+<b>العائد (ROI):</b> {roi:+.2f}%
+<b>معدل النجاح:</b> {win_rate:.1f}%
 
-<b>الوقت:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
         self.send_message(text)
     
     def notify_system_event(self, message):
-        """إخطار بحدث نظام"""
+        """إخطار حدث نظام"""
         text = f"""
 <b>⚙️ حدث نظام</b>
 
 {message}
 
-<b>الوقت:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-        self.send_message(text)
-    
-    def notify_emergency_halt(self, reason):
-        """إخطار بإيقاف طارئ"""
-        text = f"""
-<b>🚨 إيقاف طارئ</b>
-
-<b>السبب:</b> {reason}
-
-<b>الوقت:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-        self.send_message(text)
-    
-    def notify_capital_update(self, current_balance, strategy_balances):
-        """إخطار بتحديث رأس المال"""
-        text = f"""
-<b>💰 تحديث رأس المال</b>
-
-<b>الرصيد الكلي:</b> ${current_balance:.2f}
-
-<b>توزيع الاستراتيجيات:</b>
-- RSI + EMA + MACD: ${strategy_balances.get('RSI_EMA_MACD', 0):.2f}
-- Bollinger + Stochastic: ${strategy_balances.get('BB_STOCH', 0):.2f}
-- EMA + ATR: ${strategy_balances.get('EMA_ATR', 0):.2f}
-
-<b>الوقت:</b> {datetime.now().strftime('%H:%M:%S')}
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
         self.send_message(text)
