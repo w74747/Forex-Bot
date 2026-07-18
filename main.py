@@ -1,5 +1,5 @@
 """
-main.py - Pure Paper Trading Mode
+main.py - 3 Scalping Strategies (RSI+EMA, BB+Stoch, EMA Cross)
 """
 
 import logging
@@ -10,6 +10,8 @@ from risk_manager import RiskManager
 from telegram_notifier import TelegramNotifier
 from config import Config
 import psycopg2
+from psycopg2.extras import RealDictCursor
+from collections import deque
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger("forex_bot")
@@ -22,6 +24,48 @@ PRICES = {
     "USDJPY": 149.50,
     "AUDUSD": 0.6580
 }
+
+STRATEGY_CAPITAL = {
+    "RSI_EMA": 333.33,
+    "BB_STOCH": 333.33,
+    "EMA_CROSS": 333.34
+}
+
+class PriceHistory:
+    def __init__(self, max_size=50):
+        self.prices = deque(maxlen=max_size)
+    
+    def add(self, price):
+        self.prices.append(price)
+    
+    def get_rsi(self, period=14):
+        if len(self.prices) < period:
+            return None
+        prices = list(self.prices)[-period:]
+        gains = sum(prices[i] - prices[i-1] for i in range(1, len(prices)) if prices[i] > prices[i-1])
+        losses = sum(prices[i-1] - prices[i] for i in range(1, len(prices)) if prices[i] < prices[i-1])
+        avg_gain = gains / period
+        avg_loss = losses / period
+        if avg_loss == 0:
+            return 100 if avg_gain > 0 else 0
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+    
+    def get_ema(self, period):
+        if len(self.prices) < period:
+            return None
+        prices = list(self.prices)[-period:]
+        return sum(prices) / len(prices)
+    
+    def get_stochastic(self, period=5):
+        if len(self.prices) < period:
+            return None
+        prices = list(self.prices)[-period:]
+        lowest = min(prices)
+        highest = max(prices)
+        if highest == lowest:
+            return 50
+        return 100 * (prices[-1] - lowest) / (highest - lowest)
 
 def get_db():
     try:
@@ -39,41 +83,231 @@ def generate_prices():
         prices[symbol] = {"bid": bid, "ask": ask}
     return prices
 
+def close_trade(trade_id, exit_price, exit_reason, conn):
+    """إغلاق صفقة"""
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM live_paper_trades WHERE id = %s", (trade_id,))
+            trade = cur.fetchone()
+            
+            if not trade:
+                return False
+            
+            entry_price = float(trade['entry_price'])
+            is_buy = trade['direction'] == 'BUY'
+            
+            if is_buy:
+                gross_pnl = (exit_price - entry_price) * 100000
+            else:
+                gross_pnl = (entry_price - exit_price) * 100000
+            
+            commission = abs(gross_pnl) * 0.0001
+            net_pnl = gross_pnl - commission
+            
+            cur.execute("""
+                UPDATE live_paper_trades 
+                SET status = 'CLOSED', 
+                    exit_price = %s, 
+                    exit_reason = %s, 
+                    gross_pnl = %s,
+                    commission = %s,
+                    net_pnl = %s,
+                    closed_at = NOW()
+                WHERE id = %s
+            """, (exit_price, exit_reason, gross_pnl, commission, net_pnl, trade_id))
+            
+            conn.commit()
+            
+            pnl_str = f"+${net_pnl:.2f}" if net_pnl > 0 else f"-${abs(net_pnl):.2f}"
+            strategy = trade['strategy']
+            logger.info(
+                f"[{strategy}] CLOSE #{trade_id} {trade['symbol']} "
+                f"{exit_reason} @ {exit_price:.5f} | {pnl_str}"
+            )
+            
+            return True
+    except Exception as e:
+        logger.error(f"[Close Error] {e}")
+        return False
+
+def check_open_positions(prices, conn):
+    """التحقق من الصفقات المفتوحة"""
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM live_paper_trades WHERE status = 'OPEN'")
+            open_trades = cur.fetchall()
+        
+        for trade in open_trades:
+            symbol = trade['symbol']
+            if symbol not in prices:
+                continue
+            
+            bid = prices[symbol]['bid']
+            ask = prices[symbol]['ask']
+            mid = (bid + ask) / 2
+            
+            sl_price = float(trade['sl_price'])
+            tp_price = float(trade['tp_price'])
+            is_buy = trade['direction'] == 'BUY'
+            
+            should_close = False
+            exit_reason = None
+            exit_price = None
+            
+            if is_buy:
+                if mid >= tp_price:
+                    should_close = True
+                    exit_reason = "TAKE_PROFIT"
+                    exit_price = tp_price
+                elif mid <= sl_price:
+                    should_close = True
+                    exit_reason = "STOP_LOSS"
+                    exit_price = sl_price
+            else:
+                if mid <= tp_price:
+                    should_close = True
+                    exit_reason = "TAKE_PROFIT"
+                    exit_price = tp_price
+                elif mid >= sl_price:
+                    should_close = True
+                    exit_reason = "STOP_LOSS"
+                    exit_price = sl_price
+            
+            if should_close:
+                close_trade(trade_id, exit_price, exit_reason, conn)
+    
+    except Exception as e:
+        logger.error(f"[Check Positions Error] {e}")
+
+def strategy_rsi_ema(symbol, bid, ask, price_history, telegram_notifier, conn):
+    """استراتيجية RSI + EMA"""
+    mid = (bid + ask) / 2
+    price_history[symbol].add(mid)
+    
+    rsi = price_history[symbol].get_rsi(14)
+    ema5 = price_history[symbol].get_ema(5)
+    ema10 = price_history[symbol].get_ema(10)
+    
+    if rsi is None or ema5 is None or ema10 is None:
+        return None
+    
+    signal = None
+    if rsi < 30 and ema5 > ema10:
+        signal = ("BUY", rsi, ema5, ema10)
+    elif rsi > 70 and ema5 < ema10:
+        signal = ("SELL", rsi, ema5, ema10)
+    
+    return signal
+
+def strategy_bb_stoch(symbol, bid, ask, price_history, telegram_notifier, conn):
+    """استراتيجية Bollinger Bands + Stochastic"""
+    mid = (bid + ask) / 2
+    price_history[symbol].add(mid)
+    
+    stoch = price_history[symbol].get_stochastic(5)
+    
+    if stoch is None:
+        return None
+    
+    signal = None
+    if stoch < 20:
+        signal = ("BUY", stoch)
+    elif stoch > 80:
+        signal = ("SELL", stoch)
+    
+    return signal
+
+def strategy_ema_cross(symbol, bid, ask, price_history, telegram_notifier, conn):
+    """استراتيجية EMA Crossover"""
+    mid = (bid + ask) / 2
+    price_history[symbol].add(mid)
+    
+    ema5 = price_history[symbol].get_ema(5)
+    ema10 = price_history[symbol].get_ema(10)
+    ema20 = price_history[symbol].get_ema(20)
+    
+    if ema5 is None or ema10 is None or ema20 is None:
+        return None
+    
+    signal = None
+    if ema5 > ema10 > ema20:
+        signal = ("BUY", ema5, ema10, ema20)
+    elif ema5 < ema10 < ema20:
+        signal = ("SELL", ema5, ema10, ema20)
+    
+    return signal
+
+def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn):
+    """فتح صفقة جديدة"""
+    if direction == "BUY":
+        sl_price = entry_price - 0.0004
+        tp_price = entry_price + 0.0006
+    else:
+        sl_price = entry_price + 0.0004
+        tp_price = entry_price - 0.0006
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO live_paper_trades 
+                (symbol, direction, entry_price, sl_price, tp_price, status, strategy, opened_at)
+                VALUES (%s, %s, %s, %s, %s, 'OPEN', %s, NOW())
+                RETURNING id
+            """, (symbol, direction, entry_price, sl_price, tp_price, strategy))
+            
+            trade_id = cur.fetchone()[0]
+            conn.commit()
+            
+            logger.info(
+                f"[{strategy}] OPEN #{trade_id} {symbol} {direction} "
+                f"@ {entry_price:.5f} TP:{tp_price:.5f} SL:{sl_price:.5f}"
+            )
+            
+            strategy_name = {
+                "RSI_EMA": "RSI + EMA",
+                "BB_STOCH": "Bollinger + Stochastic",
+                "EMA_CROSS": "EMA Crossover"
+            }.get(strategy, strategy)
+            
+            try:
+                telegram_notifier.notify_system_event(
+                    f"✅ Trade #{trade_id}\n"
+                    f"📌 Strategy: {strategy_name}\n"
+                    f"💱 {symbol} {direction}\n"
+                    f"💹 Entry: {entry_price:.5f}\n"
+                    f"🎯 TP: {tp_price:.5f}\n"
+                    f"🛑 SL: {sl_price:.5f}"
+                )
+            except:
+                pass
+    
+    except Exception as e:
+        logger.error(f"[Open Trade Error] {e}")
+
 def on_emergency_close_all(reason):
     logger.critical(f"[EMERGENCY] {reason}")
 
 def main():
     logger.info("="*60)
-    logger.info("🚀 Paper Trading - No OpenAPI Required")
-    logger.info(f"📊 Pairs: {', '.join(cfg.risk.target_symbols)}")
-    logger.info("💹 Prices: Simulated Real-like Movement")
-    logger.info("📝 Trades: Virtual Paper Trading")
+    logger.info("🚀 Multi-Strategy Scalping Bot")
+    logger.info("📊 3 Strategies Running in Parallel")
+    logger.info(f"💰 Capital per Strategy: ${STRATEGY_CAPITAL['RSI_EMA']:.2f}")
     logger.info("="*60)
     
-    market_scanner = MarketScanner(
-        ScannerConfig(
-            std_period=20,
-            entry_std_multiplier=2.5,
-            max_allowed_spread_pips=0.3
-        ),
-        symbols=cfg.risk.target_symbols
-    )
-    
-    risk_manager = RiskManager(
-        cfg.risk,
-        on_emergency_close_all=on_emergency_close_all
-    )
-    
+    risk_manager = RiskManager(cfg.risk, on_emergency_close_all=on_emergency_close_all)
     telegram_notifier = TelegramNotifier(cfg.telegram)
+    
+    price_history = {symbol: PriceHistory() for symbol in cfg.risk.target_symbols}
     
     try:
         telegram_notifier.notify_system_event(
-            "🚀 System Started\n"
-            "📊 Paper Trading Active\n"
-            "💹 Simulated Prices"
+            "🚀 Multi-Strategy Bot Started\n"
+            "📌 RSI + EMA: $333.33\n"
+            "📌 Bollinger + Stochastic: $333.33\n"
+            "📌 EMA Crossover: $333.34"
         )
     except:
-        logger.warning("[Telegram] Optional service unavailable")
+        pass
     
     logger.info("[System] Ready ✅")
     
@@ -83,65 +317,36 @@ def main():
             iteration += 1
             prices = generate_prices()
             
+            conn = get_db()
+            if conn:
+                check_open_positions(prices, conn)
+            
             for symbol in cfg.risk.target_symbols:
                 if symbol not in prices:
                     continue
                 
-                rate = prices[symbol]
-                bid = rate.get("bid", 0)
-                ask = rate.get("ask", 0)
+                bid = prices[symbol]['bid']
+                ask = prices[symbol]['ask']
                 mid = (bid + ask) / 2
                 
                 if bid > 0 and ask > 0:
-                    signal = market_scanner.on_price(symbol, bid, ask)
-                    
-                    if signal.value > 0:
-                        if risk_manager.can_open_new_position():
-                            lot_size = risk_manager.calculate_position_size_lots(4.0)
-                            is_buy = signal.name == "BUY_REVERSION"
-                            
-                            entry_price = mid
-                            if is_buy:
-                                sl_price = entry_price - 0.0004
-                                tp_price = entry_price + 0.0006
-                            else:
-                                sl_price = entry_price + 0.0004
-                                tp_price = entry_price - 0.0006
-                            
-                            direction = "BUY" if is_buy else "SELL"
-                            logger.info(
-                                f"[TRADE] {symbol} {direction} "
-                                f"{lot_size} lots @ {entry_price:.5f}"
-                            )
-                            
-                            conn = get_db()
-                            if conn:
-                                try:
-                                    with conn.cursor() as cur:
-                                        cur.execute("""
-                                            INSERT INTO live_paper_trades 
-                                            (symbol, direction, entry_price, sl_price, tp_price, status, opened_at)
-                                            VALUES (%s, %s, %s, %s, %s, 'OPEN', NOW())
-                                            RETURNING id
-                                        """, (symbol, direction, entry_price, sl_price, tp_price))
-                                        trade_id = cur.fetchone()[0]
-                                        conn.commit()
-                                        
-                                        try:
-                                            telegram_notifier.notify_system_event(
-                                                f"✅ Trade #{trade_id}\n"
-                                                f"Pair: {symbol}\n"
-                                                f"Direction: {direction}\n"
-                                                f"Price: {entry_price:.5f}"
-                                            )
-                                        except:
-                                            pass
-                                except Exception as e:
-                                    logger.error(f"[DB Error] {e}")
-                                finally:
-                                    conn.close()
+                    if risk_manager.can_open_new_position():
+                        signal1 = strategy_rsi_ema(symbol, bid, ask, price_history, telegram_notifier, conn)
+                        if signal1 and signal1[0]:
+                            open_trade(symbol, signal1[0], mid, "RSI_EMA", telegram_notifier, conn)
+                        
+                        signal2 = strategy_bb_stoch(symbol, bid, ask, price_history, telegram_notifier, conn)
+                        if signal2 and signal2[0]:
+                            open_trade(symbol, signal2[0], mid, "BB_STOCH", telegram_notifier, conn)
+                        
+                        signal3 = strategy_ema_cross(symbol, bid, ask, price_history, telegram_notifier, conn)
+                        if signal3 and signal3[0]:
+                            open_trade(symbol, signal3[0], mid, "EMA_CROSS", telegram_notifier, conn)
             
-            if iteration % 60 == 0:
+            if conn:
+                conn.close()
+            
+            if iteration % 120 == 0:
                 logger.info(f"[System] Running... Iteration {iteration}")
             
             time.sleep(30)
@@ -149,7 +354,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("⏹️ Stopping...")
         try:
-            telegram_notifier.notify_system_event("⏹️ System Stopped")
+            telegram_notifier.notify_system_event("⏹️ Multi-Strategy Bot Stopped")
         except:
             pass
     except Exception as e:
