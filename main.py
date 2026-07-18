@@ -1,5 +1,5 @@
 """
-main.py - Paper Trading Mode (بدون OpenAPI)
+main.py - Paper Trading Mode
 """
 
 import logging
@@ -25,6 +25,9 @@ def fetch_prices():
         logger.error(f"[Price Fetch Error] {e}")
         return None
 
+def on_emergency_close_all(reason):
+    logger.critical(f"[Emergency] {reason}")
+
 def main():
     logger.info("="*60)
     logger.info("🚀 بدء نظام التداول - Paper Trading")
@@ -41,7 +44,11 @@ def main():
         symbols=cfg.risk.target_symbols
     )
     
-    risk_manager = RiskManager(cfg.risk)
+    risk_manager = RiskManager(
+        cfg.risk,
+        on_emergency_close_all=on_emergency_close_all
+    )
+    
     telegram_notifier = TelegramNotifier(cfg.telegram)
     
     telegram_notifier.notify_system_event(
