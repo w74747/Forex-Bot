@@ -1,5 +1,5 @@
 """
-telegram_notifier_v3.py - Compact Reports Every 30 Minutes
+telegram_notifier.py - Telegram Notifications with TelegramNotifierV3
 """
 
 import logging
@@ -9,6 +9,8 @@ from datetime import datetime
 logger = logging.getLogger("telegram")
 
 class TelegramNotifierV3:
+    """التيليغرام - إرسال الرسائل والتنبيهات"""
+    
     def __init__(self, config):
         self.bot_token = config.bot_token
         self.chat_id = config.chat_id
@@ -16,7 +18,7 @@ class TelegramNotifierV3:
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
     
     def send_message(self, text):
-        """إرسال رسالة"""
+        """إرسال رسالة نصية"""
         if not self.enabled:
             return False
         
@@ -33,51 +35,78 @@ class TelegramNotifierV3:
             logger.error(f"[Telegram] {e}")
             return False
     
-    def notify_compact_report(self, account_stats, trades_data, monthly_summary):
-        """تقرير مختصر كل 30 دقيقة"""
-        
-        balance = account_stats['current_balance']
-        monthly_pnl = account_stats['monthly_pnl']
-        total_trades_closed = trades_data['total_trades']
-        wins = trades_data['wins']
-        losses = trades_data['losses']
-        pnl_30min = trades_data['pnl_30min']
-        
-        # رموز بناءً على الأداء
-        monthly_emoji = "📈" if monthly_pnl > 0 else "📉"
-        period_emoji = "✅" if pnl_30min >= 0 else "⚠️"
-        
+    def notify_trade_opened(self, symbol, direction, entry_price, sl, tp, lot_size, strategy):
+        """إشعار فتح صفقة"""
+        emoji = "🟢" if direction == "BUY" else "🔴"
         text = f"""
-<b>📊 تقرير كل 30 دقيقة</b>
+{emoji} <b>صفقة جديدة</b>
 
-<b>💰 الرصيد:</b> ${balance:.2f}
-<b>📈 الشهري:</b> ${monthly_pnl:+.2f}
-━━━━━━━━━━━━━━━━━━━━━━
-<b>{period_emoji} آخر 30 دقيقة:</b>
-- الصفقات: {total_trades_closed} (✅{wins} ❌{losses})
-- الربح: ${pnl_30min:+.2f}
-━━━━━━━━━━━━━━━━━━━━━━
-<b>🎯 الشهر:</b>
-- الإجمالي: {monthly_summary['total_trades']}
-- معدل النجاح: {monthly_summary['win_rate']:.1f}%
+<b>💱 الزوج:</b> {symbol}
+<b>📊 الاتجاه:</b> {direction}
+<b>📈 السعر:</b> {entry_price:.5f}
+<b>🎯 TP:</b> {tp:.5f}
+<b>⛔ SL:</b> {sl:.5f}
+<b>📦 الحجم:</b> {lot_size}
+<b>🤖 الاستراتيجية:</b> {strategy}
 
-⏰ {datetime.now().strftime('%H:%M')}
+⏰ {datetime.now().strftime('%H:%M:%S')}
 """
         self.send_message(text)
     
-    def notify_ai_analysis(self, performance_analysis, code_review):
-        """تقرير تحليل DeepSeek"""
+    def notify_trade_closed(self, symbol, direction, entry_price, exit_price, pnl, reason, strategy):
+        """إشعار إغلاق صفقة"""
+        pnl_emoji = "✅" if pnl > 0 else "❌"
+        pnl_sign = "+" if pnl > 0 else ""
         
         text = f"""
-<b>🤖 تقرير DeepSeek AI</b>
+{pnl_emoji} <b>صفقة مغلقة</b>
 
-<b>📊 تحليل الأداء:</b>
-{performance_analysis}
+<b>💱 الزوج:</b> {symbol}
+<b>📊 الاتجاه:</b> {direction}
+<b>📊 الدخول:</b> {entry_price:.5f}
+<b>📊 الخروج:</b> {exit_price:.5f}
+<b>💰 الربح/الخسارة:</b> <b>${pnl_sign}{pnl:.2f}</b>
+<b>📌 السبب:</b> {reason}
+<b>🤖 الاستراتيجية:</b> {strategy}
 
-━━━━━━━━━━━━━━━━━━━━━━
-<b>🔧 مراجعة الكود:</b>
-{code_review}
+⏰ {datetime.now().strftime('%H:%M:%S')}
+"""
+        self.send_message(text)
+    
+    def notify_system_event(self, message):
+        """إشعار حدث نظام"""
+        text = f"""
+⚙️ <b>تنبيه النظام</b>
+
+{message}
+
+⏰ {datetime.now().strftime('%H:%M:%S')}
+"""
+        self.send_message(text)
+    
+    def notify_daily_summary(self, total_trades, wins, losses, daily_pnl, win_rate):
+        """تقرير يومي"""
+        emoji = "📈" if daily_pnl > 0 else "📉"
+        text = f"""
+{emoji} <b>التقرير اليومي</b>
+
+<b>📊 الصفقات:</b> {total_trades}
+<b>✅ رابحة:</b> {wins}
+<b>❌ خاسرة:</b> {losses}
+<b>💰 الإجمالي:</b> ${daily_pnl:+.2f}
+<b>📈 نسبة النجاح:</b> {win_rate:.1f}%
 
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        self.send_message(text)
+    
+    def notify_error(self, error_msg):
+        """إشعار خطأ"""
+        text = f"""
+💥 <b>خطأ</b>
+
+{error_msg}
+
+⏰ {datetime.now().strftime('%H:%M:%S')}
 """
         self.send_message(text)
