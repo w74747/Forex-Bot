@@ -1,5 +1,5 @@
 """
-flask_dashboard.py - Trading Bot Dashboard
+flask_dashboard.py - Trading Dashboard
 """
 
 import os
@@ -8,320 +8,121 @@ from datetime import datetime
 from io import BytesIO
 
 import psycopg2
-from flask import Flask, render_template, jsonify, request, send_file
+from flask import Flask, render_template, jsonify, request
 from psycopg2.extras import RealDictCursor
 
-try:
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    OPENPYXL_AVAILABLE = True
-except ImportError:
-    OPENPYXL_AVAILABLE = False
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("dashboard")
 
 app = Flask(__name__)
-DATABASE_URL = os.environ.get("DATABASE_URL")
-DEBUG = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
 
-logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
-logger = logging.getLogger("dashboard")
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 def get_db():
     try:
         return psycopg2.connect(DATABASE_URL, connect_timeout=5)
     except Exception as e:
-        logger.error(f"[DB Connection Error] {e}")
+        logger.error(f"DB Error: {e}")
         return None
 
-def query_trades(status=None, symbol=None, start_date=None, end_date=None, limit=100):
-    """جلب الصفقات"""
+@app.route('/')
+def dashboard():
+    return render_template('dashboard.html')
+
+@app.route('/api/trades')
+def api_trades():
     conn = get_db()
     if not conn:
-        return []
+        return jsonify({'error': 'Database connection failed'}), 500
     
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            query = "SELECT * FROM live_paper_trades WHERE 1=1"
-            params = []
-            
-            if status:
-                query += " AND status = %s"
-                params.append(status)
-            if symbol:
-                query += " AND symbol = %s"
-                params.append(symbol)
-            if start_date:
-                query += " AND DATE(opened_at) >= %s"
-                params.append(start_date)
-            if end_date:
-                query += " AND DATE(opened_at) <= %s"
-                params.append(end_date)
-            
-            query += " ORDER BY opened_at DESC LIMIT %s"
-            params.append(limit)
-            
-            cur.execute(query, params)
-            result = [dict(row) for row in cur.fetchall()]
-            logger.info(f"[Trades Query] Found {len(result)} trades")
-            return result
-    except Exception as e:
-        logger.error(f"[DB Query Error] {e}")
-        return []
-    finally:
+            cur.execute("""
+                SELECT 
+                    id, symbol, direction, entry_price, exit_price,
+                    status, net_pnl, strategy, opened_at, closed_at
+                FROM live_paper_trades
+                ORDER BY id DESC
+                LIMIT 100
+            """)
+            trades = [dict(row) for row in cur.fetchall()]
+        
         conn.close()
+        return jsonify(trades)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
-def get_statistics():
-    """حساب الإحصائيات"""
+@app.route('/api/stats')
+def api_stats():
     conn = get_db()
     if not conn:
-        return {}
+        return jsonify({'error': 'Database connection failed'}), 500
     
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT 
                     COUNT(*) as total_trades,
-                    SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
-                    SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
-                    COALESCE(SUM(net_pnl), 0) as total_pnl,
-                    AVG(net_pnl) as avg_pnl
-                FROM live_paper_trades 
-                WHERE status = 'CLOSED'
+                    SUM(CASE WHEN status = 'CLOSED' THEN 1 ELSE 0 END) as closed_trades,
+                    SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END) as open_trades,
+                    SUM(CASE WHEN net_pnl > 0 AND status = 'CLOSED' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN net_pnl < 0 AND status = 'CLOSED' THEN 1 ELSE 0 END) as losses,
+                    COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN net_pnl ELSE 0 END), 0) as total_pnl,
+                    COALESCE(AVG(CASE WHEN status = 'CLOSED' THEN net_pnl END), 0) as avg_pnl
+                FROM live_paper_trades
             """)
-            stats = dict(cur.fetchone() or {})
+            result = cur.fetchone()
+            stats = dict(result) if result else {}
             
-            total = stats.get('total_trades') or 0
-            if total > 0:
-                win_rate = (stats.get('winning_trades') or 0) / total * 100
-                stats['win_rate'] = round(win_rate, 2)
-            else:
-                stats['win_rate'] = 0
+            total_trades = stats.get('total_trades', 0) or 0
+            wins = stats.get('wins', 0) or 0
+            losses = stats.get('losses', 0) or 0
             
-            stats['total_pnl'] = float(stats.get('total_pnl') or 0)
-            stats['winning_trades'] = stats.get('winning_trades') or 0
-            stats['losing_trades'] = stats.get('losing_trades') or 0
+            win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
             
-            cur.execute("SELECT COUNT(*) as open_positions FROM live_paper_trades WHERE status = 'OPEN'")
-            open_stats = dict(cur.fetchone() or {})
-            stats['open_positions'] = open_stats.get('open_positions', 0)
-            
-            logger.info(
-                f"[Stats] Total: {total}, Win: {stats['winning_trades']}, "
-                f"Loss: {stats['losing_trades']}, Rate: {stats['win_rate']}%, "
-                f"PnL: ${stats['total_pnl']:.2f}"
-            )
-            
-            return stats
-    except Exception as e:
-        logger.error(f"[DB Stats Error] {e}")
-        return {}
-    finally:
-        conn.close()
-
-def get_daily_equity_curve(days=7):
-    """حساب منحنى الرصيد"""
-    conn = get_db()
-    if not conn:
-        return []
-    
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(f"""
-                WITH daily_pnl AS (
-                    SELECT 
-                        DATE(closed_at) as trade_date,
-                        SUM(net_pnl) as daily_sum
-                    FROM live_paper_trades
-                    WHERE status = 'CLOSED'
-                    AND closed_at >= NOW() - INTERVAL '{days} days'
-                    GROUP BY DATE(closed_at)
-                    ORDER BY trade_date
-                )
-                SELECT 
-                    trade_date,
-                    daily_sum,
-                    SUM(daily_sum) OVER (ORDER BY trade_date) as cumulative_pnl
-                FROM daily_pnl
-            """)
-            result = [dict(row) for row in cur.fetchall()]
-            logger.info(f"[Equity Curve] {len(result)} days of data")
-            return result
-    except Exception as e:
-        logger.error(f"[DB Equity Curve Error] {e}")
-        return []
-    finally:
-        conn.close()
-
-def get_logs(log_type=None, start_date=None, end_date=None, limit=200):
-    """جلب السجلات"""
-    conn = get_db()
-    if not conn:
-        return []
-    
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            query = "SELECT * FROM system_logs WHERE 1=1"
-            params = []
-            
-            if log_type:
-                query += " AND log_type = %s"
-                params.append(log_type)
-            if start_date:
-                query += " AND DATE(created_at) >= %s"
-                params.append(start_date)
-            if end_date:
-                query += " AND DATE(created_at) <= %s"
-                params.append(end_date)
-            
-            query += " ORDER BY created_at DESC LIMIT %s"
-            params.append(limit)
-            
-            cur.execute(query, params)
-            result = [dict(row) for row in cur.fetchall()]
-            logger.info(f"[Logs Query] Found {len(result)} logs")
-            return result
-    except Exception as e:
-        logger.error(f"[DB Logs Error] {e}")
-        return []
-    finally:
-        conn.close()
-
-@app.route('/')
-def index():
-    """الصفحة الرئيسية"""
-    return render_template('dashboard.html')
-
-@app.route('/api/trades', methods=['GET'])
-def api_trades():
-    """API للصفقات"""
-    status = request.args.get('status')
-    symbol = request.args.get('symbol')
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
-    limit = int(request.args.get('limit', 100))
-    
-    trades = query_trades(status, symbol, start_date, end_date, limit)
-    for trade in trades:
-        if trade.get('opened_at'):
-            trade['opened_at'] = trade['opened_at'].isoformat()
-        if trade.get('closed_at'):
-            trade['closed_at'] = trade['closed_at'].isoformat()
-    
-    return jsonify(trades)
-
-@app.route('/api/statistics', methods=['GET'])
-def api_statistics():
-    """API للإحصائيات"""
-    stats = get_statistics()
-    return jsonify(stats)
-
-@app.route('/api/equity-curve', methods=['GET'])
-def api_equity_curve():
-    """API لمنحنى الرصيد"""
-    days = int(request.args.get('days', 7))
-    curve = get_daily_equity_curve(days)
-    for point in curve:
-        if point.get('trade_date'):
-            point['trade_date'] = point['trade_date'].isoformat()
-    
-    return jsonify(curve)
-
-@app.route('/api/logs', methods=['GET'])
-def api_logs():
-    """API للسجلات"""
-    log_type = request.args.get('log_type')
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
-    limit = int(request.args.get('limit', 200))
-    
-    logs = get_logs(log_type, start_date, end_date, limit)
-    for log in logs:
-        if log.get('created_at'):
-            log['created_at'] = log['created_at'].isoformat()
-    
-    return jsonify(logs)
-
-@app.route('/api/export/trades', methods=['GET'])
-def export_trades_excel():
-    """تصدير الصفقات"""
-    if not OPENPYXL_AVAILABLE:
-        return jsonify({"error": "openpyxl not installed"}), 500
-    
-    status = request.args.get('status')
-    symbol = request.args.get('symbol')
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
-    
-    trades = query_trades(status, symbol, start_date, end_date, limit=10000)
-    if not trades:
-        return jsonify({"error": "No data"}), 400
-    
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Trades"
-    
-    headers = ["ID", "Symbol", "Direction", "Entry", "SL", "TP", "Status", "Exit", "Reason", "Gross PnL", "Commission", "Net PnL", "Strategy", "Open Time", "Close Time"]
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_font = Font(bold=True, color="FFFFFF")
-    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-    
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.border = border
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-    
-    for row_idx, trade in enumerate(trades, 2):
-        data = [
-            trade.get('id'),
-            trade.get('symbol'),
-            trade.get('direction'),
-            f"{trade.get('entry_price', 0):.5f}",
-            f"{trade.get('sl_price', 0):.5f}",
-            f"{trade.get('tp_price', 0):.5f}",
-            trade.get('status'),
-            f"{trade.get('exit_price', 0):.5f}" if trade.get('exit_price') else "",
-            trade.get('exit_reason', ''),
-            f"{trade.get('gross_pnl', 0):.2f}",
-            f"{trade.get('commission', 0):.2f}",
-            f"{trade.get('net_pnl', 0):.2f}",
-            trade.get('strategy', ''),
-            str(trade.get('opened_at', '')),
-            str(trade.get('closed_at', '')) if trade.get('closed_at') else "",
-        ]
+            stats['win_rate'] = round(win_rate, 2)
+            stats['total_pnl'] = round(float(stats.get('total_pnl', 0) or 0), 2)
+            stats['avg_pnl'] = round(float(stats.get('avg_pnl', 0) or 0), 2)
+            stats['starting_balance'] = 200
+            stats['current_balance'] = 200 + stats['total_pnl']
         
-        for col, value in enumerate(data, 1):
-            cell = ws.cell(row=row_idx, column=col, value=value)
-            cell.border = border
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            if col == 12 and trade.get('net_pnl', 0) > 0:
-                cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-            elif col == 12 and trade.get('net_pnl', 0) < 0:
-                cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    
-    ws.column_dimensions['A'].width = 8
-    for col in 'BCDEFGHIJKLMNO':
-        ws.column_dimensions[col].width = 15
-    
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    
-    logger.info(f"[Export] Exported {len(trades)} trades to Excel")
-    return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f'trades_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx')
+        conn.close()
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
-@app.errorhandler(404)
-def not_found(error):
-    logger.warning(f"[404] Page not found")
-    return jsonify({"error": "Not found"}), 404
-
-@app.errorhandler(500)
-def server_error(error):
-    logger.error(f"[500] Server error: {error}")
-    return jsonify({"error": "Server error"}), 500
+@app.route('/api/equity-curve')
+def api_equity_curve():
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+    
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT 
+                    closed_at,
+                    SUM(net_pnl) OVER (ORDER BY closed_at) as cumulative_pnl
+                FROM live_paper_trades
+                WHERE status = 'CLOSED' AND closed_at IS NOT NULL
+                ORDER BY closed_at
+            """)
+            
+            data = []
+            for row in cur.fetchall():
+                if row['closed_at']:
+                    data.append({
+                        'time': row['closed_at'].isoformat(),
+                        'balance': 200 + (row['cumulative_pnl'] or 0)
+                    })
+        
+        conn.close()
+        return jsonify(data)
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    logger.info("🚀 Starting Flask Dashboard...")
-    db_info = DATABASE_URL[:50] + "..." if DATABASE_URL else "Not configured"
-    logger.info(f"📊 Database: {db_info}")
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=DEBUG, use_reloader=False)
+    app.run(host='0.0.0.0', port=5000, debug=False)
