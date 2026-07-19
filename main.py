@@ -1,5 +1,6 @@
+cat > main.py << 'EOF'
 """
-main.py - Enhanced 3 Strategies Scalping Bot
+main.py - Forex Bot with Real cTrader Connection
 """
 
 import logging
@@ -12,6 +13,7 @@ from psycopg2.extras import RealDictCursor
 
 from config import Config
 from capital_manager import CapitalManager
+from ctrader_openapi import CTraderOpenAPI
 from telegram_notifier import TelegramNotifierV3
 from monthly_tracker import MonthlyTracker
 
@@ -267,16 +269,37 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
 
 def main():
     logger.info("="*60)
-    logger.info("🚀 Forex Bot")
+    logger.info("🚀 Forex Bot with Real cTrader Connection")
     logger.info(f"📊 Mode: PAPER TRADING 📝")
     logger.info("="*60)
+    
+    # الاتصال مع cTrader
+    ctrader = None
+    use_real_prices = False
+    
+    if cfg.ctrader.enabled:
+        logger.info("[cTrader] Attempting connection...")
+        ctrader = CTraderOpenAPI(
+            client_id=cfg.ctrader.client_id,
+            account_id=cfg.ctrader.account_id,
+            username=cfg.ctrader.username,
+            password=cfg.ctrader.password
+        )
+        if ctrader.connect():
+            use_real_prices = True
+            logger.info("[cTrader] ✅ Using REAL prices from cTrader")
+        else:
+            logger.warning("[cTrader] ⚠️ Connection failed - using simulated prices")
+            ctrader = None
+    else:
+        logger.warning("[cTrader] Not configured - using simulated prices")
     
     capital_manager = CapitalManager(
         database_url=cfg.database_url,
         starting_balance=cfg.capital.starting_balance,
         risk_per_trade=cfg.capital.risk_per_trade_pct,
         lot_size_multiplier=cfg.capital.lot_size_multiplier,
-        ctrader_connector=None
+        ctrader_connector=ctrader
     )
     
     telegram_notifier = TelegramNotifierV3(cfg.telegram)
@@ -284,7 +307,8 @@ def main():
     price_history = {symbol: PriceHistory(100) for symbol in cfg.risk.target_symbols}
     
     try:
-        telegram_notifier.notify_system_event("🚀 Bot Started - PAPER TRADING")
+        mode = "REAL cTrader" if use_real_prices else "Simulated"
+        telegram_notifier.notify_system_event(f"🚀 Bot Started - {mode} Mode")
     except:
         pass
     
@@ -294,7 +318,19 @@ def main():
     try:
         while True:
             iteration += 1
-            prices = generate_prices()
+            
+            # قراءة الأسعار من cTrader أو محاكاة
+            if use_real_prices and ctrader:
+                prices = {}
+                for symbol in cfg.risk.target_symbols:
+                    price_data = ctrader.get_price(symbol)
+                    if price_data:
+                        prices[symbol] = price_data
+                    else:
+                        # fallback لـ simulated إذا فشل الاتصال
+                        prices[symbol] = {"bid": DEFAULT_PRICES.get(symbol, 1.0), "ask": DEFAULT_PRICES.get(symbol, 1.0) + 0.0005}
+            else:
+                prices = generate_prices()
             
             conn = None
             try:
@@ -332,8 +368,17 @@ def main():
     
     except KeyboardInterrupt:
         logger.info("⏹️ Stopped")
+        if ctrader:
+            ctrader.disconnect()
     except Exception as e:
         logger.critical(f"[Fatal] {e}")
+        if ctrader:
+            ctrader.disconnect()
 
 if __name__ == '__main__':
     main()
+EOF
+
+git add main.py
+git commit -m "feat: integrate real cTrader OpenAPI for live prices and balance"
+git push origin main
