@@ -1,10 +1,10 @@
 """
-main.py - Enhanced 3 Strategies Scalping Bot
+main.py - Enhanced 3 Strategies Scalping Bot with Real cTrader Connection
 """
 
 import logging
 import time
-import random
+import os
 from collections import deque
 from datetime import datetime
 import psycopg2
@@ -12,6 +12,7 @@ from psycopg2.extras import RealDictCursor
 
 from config import Config
 from capital_manager import CapitalManager
+from ctrader_connector import CTraderConnector
 from telegram_notifier import TelegramNotifierV3
 from monthly_tracker import MonthlyTracker
 
@@ -19,13 +20,6 @@ logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger("forex_bot")
 
 cfg = Config()
-
-PRICES = {
-    "EURUSD": 1.0850,
-    "GBPUSD": 1.2750,
-    "USDJPY": 149.50,
-    "AUDUSD": 0.6580
-}
 
 class PriceHistory:
     def __init__(self, max_size=100):
@@ -83,15 +77,6 @@ def get_db():
     except Exception as e:
         logger.error(f"[DB Error] {e}")
         return None
-
-def generate_prices():
-    prices = {}
-    for symbol, base_price in PRICES.items():
-        change = random.uniform(-0.0015, 0.0015)
-        bid = base_price + change
-        ask = bid + 0.0005
-        prices[symbol] = {"bid": bid, "ask": ask}
-    return prices
 
 def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker):
     if not conn:
@@ -312,26 +297,54 @@ def main():
     logger.info("="*60)
     logger.info("🚀 Enhanced Multi-Strategy Scalping Bot")
     logger.info(f"📊 Mode: {'LIVE 🔴' if not cfg.dry_run else 'PAPER TRADING 📝'}")
-    logger.info(f"💰 Starting Balance: ${cfg.capital.starting_balance}")
-    logger.info(f"⚡ Risk Per Trade: {cfg.capital.risk_per_trade_pct}%")
+    logger.info(f"💰 Risk Per Trade: {cfg.capital.risk_per_trade_pct}%")
+    logger.info(f"📈 Lot Size Multiplier: {cfg.capital.lot_size_multiplier}x")
     logger.info("="*60)
+    
+    # الاتصال مع cTrader إذا كان مفعلاً
+    ctrader_connector = None
+    if cfg.ctrader.enabled:
+        logger.info("[cTrader] Attempting connection...")
+        ctrader_connector = CTraderConnector(
+            client_id=cfg.ctrader.client_id,
+            account_id=cfg.ctrader.account_id,
+            fix_host=cfg.ctrader.fix_host,
+            fix_port=cfg.ctrader.fix_port,
+            fix_username=cfg.ctrader.fix_username
+        )
+        if ctrader_connector.connect():
+            logger.info("[cTrader] ✅ Connected successfully")
+        else:
+            logger.warning("[cTrader] ⚠️ Connection failed - using simulated prices")
+            ctrader_connector = None
+    else:
+        logger.warning("[cTrader] ⚠️ Not configured - using simulated prices")
     
     capital_manager = CapitalManager(
         database_url=cfg.database_url,
         starting_balance=cfg.capital.starting_balance,
-        risk_per_trade=cfg.capital.risk_per_trade_pct
+        risk_per_trade=cfg.capital.risk_per_trade_pct,
+        lot_size_multiplier=cfg.capital.lot_size_multiplier,
+        ctrader_connector=ctrader_connector
     )
     
     telegram_notifier = TelegramNotifierV3(cfg.telegram)
     monthly_tracker = MonthlyTracker()
     price_history = {symbol: PriceHistory(100) for symbol in cfg.risk.target_symbols}
     
+    # الأسعار الافتراضية للمحاكاة
+    DEFAULT_PRICES = {
+        "EURUSD": 1.0850,
+        "GBPUSD": 1.2750,
+        "USDJPY": 149.50,
+        "AUDUSD": 0.6580
+    }
+    
     try:
         mode = "LIVE 🔴" if not cfg.dry_run else "PAPER TRADING 📝"
         telegram_notifier.notify_system_event(
             f"🚀 Bot Started\n"
             f"📌 3 Improved Strategies\n"
-            f"💰 Balance: ${cfg.capital.starting_balance}\n"
             f"🔒 Mode: {mode}"
         )
     except Exception as e:
@@ -343,7 +356,21 @@ def main():
     try:
         while True:
             iteration += 1
-            prices = generate_prices()
+            
+            # قراءة الأسعار من cTrader أو المحاكاة
+            if ctrader_connector and ctrader_connector.is_connected():
+                prices = ctrader_connector.prices_cache.copy()
+                if not prices:
+                    prices = DEFAULT_PRICES.copy()
+            else:
+                # محاكاة الأسعار
+                import random
+                prices = {}
+                for symbol, base_price in DEFAULT_PRICES.items():
+                    change = random.uniform(-0.0015, 0.0015)
+                    bid = base_price + change
+                    ask = bid + 0.0005
+                    prices[symbol] = {"bid": bid, "ask": ask}
             
             conn = None
             try:
@@ -390,12 +417,16 @@ def main():
     
     except KeyboardInterrupt:
         logger.info("⏹️ Stopping...")
+        if ctrader_connector:
+            ctrader_connector.disconnect()
         try:
             telegram_notifier.notify_system_event("⏹️ Bot Stopped")
         except Exception as e:
             logger.warning(f"[Telegram] {e}")
     except Exception as e:
         logger.critical(f"[Fatal Error] {e}")
+        if ctrader_connector:
+            ctrader_connector.disconnect()
         try:
             telegram_notifier.notify_system_event(f"💥 Error: {e}")
         except Exception as ex:
