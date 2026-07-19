@@ -94,6 +94,10 @@ def generate_prices():
     return prices
 
 def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker):
+    if not conn:
+        logger.error(f"[Close Trade] No database connection")
+        return False
+    
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM live_paper_trades WHERE id = %s", (trade_id,))
@@ -122,10 +126,9 @@ def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_noti
                     gross_pnl = %s,
                     commission = %s,
                     net_pnl = %s,
-                    lot_size = %s,
                     closed_at = NOW()
                 WHERE id = %s
-            """, (exit_price, exit_reason, gross_pnl, commission, net_pnl, lot_size, trade_id))
+            """, (exit_price, exit_reason, gross_pnl, commission, net_pnl, trade_id))
             
             conn.commit()
             
@@ -143,6 +146,10 @@ def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_noti
             
             return True
     except Exception as e:
+        try:
+            conn.rollback()
+        except:
+            pass
         logger.error(f"[Close Error] {e}")
         return False
 
@@ -273,14 +280,18 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
     sl_price, tp_price = calculate_dynamic_tp_sl(entry_price, is_buy, atr_value)
     lot_size = capital_manager.get_optimal_lot_size(entry_price, strategy)
     
+    if not conn:
+        logger.error(f"[Open Trade] No database connection")
+        return
+    
     try:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO live_paper_trades 
-                (symbol, direction, entry_price, sl_price, tp_price, status, strategy, lot_size, opened_at)
-                VALUES (%s, %s, %s, %s, %s, 'OPEN', %s, %s, NOW())
+                (symbol, direction, entry_price, sl_price, tp_price, status, strategy, opened_at)
+                VALUES (%s, %s, %s, %s, %s, 'OPEN', %s, NOW())
                 RETURNING id
-            """, (symbol, direction, entry_price, sl_price, tp_price, strategy, lot_size))
+            """, (symbol, direction, entry_price, sl_price, tp_price, strategy))
             
             trade_id = cur.fetchone()[0]
             conn.commit()
@@ -291,6 +302,10 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
             )
     
     except Exception as e:
+        try:
+            conn.rollback()
+        except:
+            pass
         logger.error(f"[Open Trade Error] {e}")
 
 def main():
@@ -330,36 +345,43 @@ def main():
             iteration += 1
             prices = generate_prices()
             
-            conn = get_db()
-            if conn:
-                check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker)
-            
-            for symbol in cfg.risk.target_symbols:
-                if symbol not in prices:
-                    continue
-                
-                bid = prices[symbol]['bid']
-                ask = prices[symbol]['ask']
-                mid = (bid + ask) / 2
-                
-                if bid > 0 and ask > 0:
-                    signal1 = strategy_rsi_ema_macd(symbol, bid, ask, price_history)
-                    if signal1:
-                        atr1 = price_history[symbol].get_atr(14)
-                        open_trade(symbol, signal1, mid, "RSI_EMA_MACD", telegram_notifier, conn, capital_manager, atr1)
+            conn = None
+            try:
+                conn = get_db()
+                if conn:
+                    check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker)
                     
-                    signal2 = strategy_bb_stoch_volume(symbol, bid, ask, price_history)
-                    if signal2:
-                        atr2 = price_history[symbol].get_atr(14)
-                        open_trade(symbol, signal2, mid, "BB_STOCH", telegram_notifier, conn, capital_manager, atr2)
-                    
-                    signal3 = strategy_ema_cross_atr(symbol, bid, ask, price_history)
-                    if signal3:
-                        atr3 = price_history[symbol].get_atr(14)
-                        open_trade(symbol, signal3, mid, "EMA_ATR", telegram_notifier, conn, capital_manager, atr3)
-            
-            if conn:
-                conn.close()
+                    for symbol in cfg.risk.target_symbols:
+                        if symbol not in prices:
+                            continue
+                        
+                        bid = prices[symbol]['bid']
+                        ask = prices[symbol]['ask']
+                        mid = (bid + ask) / 2
+                        
+                        if bid > 0 and ask > 0:
+                            signal1 = strategy_rsi_ema_macd(symbol, bid, ask, price_history)
+                            if signal1:
+                                atr1 = price_history[symbol].get_atr(14)
+                                open_trade(symbol, signal1, mid, "RSI_EMA_MACD", telegram_notifier, conn, capital_manager, atr1)
+                            
+                            signal2 = strategy_bb_stoch_volume(symbol, bid, ask, price_history)
+                            if signal2:
+                                atr2 = price_history[symbol].get_atr(14)
+                                open_trade(symbol, signal2, mid, "BB_STOCH", telegram_notifier, conn, capital_manager, atr2)
+                            
+                            signal3 = strategy_ema_cross_atr(symbol, bid, ask, price_history)
+                            if signal3:
+                                atr3 = price_history[symbol].get_atr(14)
+                                open_trade(symbol, signal3, mid, "EMA_ATR", telegram_notifier, conn, capital_manager, atr3)
+            except Exception as e:
+                logger.error(f"[Iteration Error] {e}")
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except:
+                        pass
             
             if iteration % 120 == 0:
                 logger.info(f"[System] Running... Iteration {iteration}")
