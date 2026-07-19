@@ -1,5 +1,5 @@
 """
-main.py - Fixed Syntax Error
+main.py - Enhanced 3 Strategies Scalping Bot with Dynamic Capital Management
 """
 
 import logging
@@ -12,7 +12,7 @@ from psycopg2.extras import RealDictCursor
 
 from config import Config
 from capital_manager import CapitalManager
-from telegram_notifier_v3 import TelegramNotifierV3
+from telegram_notifier import TelegramNotifier
 from monthly_tracker import MonthlyTracker
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
@@ -28,13 +28,16 @@ PRICES = {
 }
 
 class PriceHistory:
+    """تخزين ومعالجة سجل الأسعار"""
     def __init__(self, max_size=100):
         self.prices = deque(maxlen=max_size)
     
     def add(self, price):
+        """إضافة سعر جديد"""
         self.prices.append(price)
     
     def get_rsi(self, period=14):
+        """حساب مؤشر القوة النسبية (RSI)"""
         if len(self.prices) < period:
             return None
         prices = list(self.prices)[-period:]
@@ -48,12 +51,14 @@ class PriceHistory:
         return 100 - (100 / (1 + rs))
     
     def get_ema(self, period):
+        """حساب المتوسط المتحرك الأسي (EMA)"""
         if len(self.prices) < period:
             return None
         prices = list(self.prices)[-period:]
         return sum(prices) / len(prices)
     
     def get_macd(self):
+        """حساب MACD"""
         ema12 = self.get_ema(12)
         ema26 = self.get_ema(26)
         if ema12 is None or ema26 is None:
@@ -61,6 +66,7 @@ class PriceHistory:
         return ema12 - ema26, ema12 - ema26
     
     def get_stochastic(self, period=5):
+        """حساب مؤشر Stochastic"""
         if len(self.prices) < period:
             return None
         prices = list(self.prices)[-period:]
@@ -71,6 +77,7 @@ class PriceHistory:
         return 100 * (prices[-1] - lowest) / (highest - lowest)
     
     def get_atr(self, period=14):
+        """حساب متوسط النطاق الحقيقي (ATR)"""
         if len(self.prices) < period + 1:
             return None
         prices = list(self.prices)[-(period+1):]
@@ -78,6 +85,7 @@ class PriceHistory:
         return sum(tr_values) / len(tr_values) if tr_values else None
 
 def get_db():
+    """الاتصال بقاعدة البيانات"""
     try:
         return psycopg2.connect(cfg.database_url, connect_timeout=5)
     except Exception as e:
@@ -85,6 +93,7 @@ def get_db():
         return None
 
 def generate_prices():
+    """توليد أسعار محاكاة"""
     prices = {}
     for symbol, base_price in PRICES.items():
         change = random.uniform(-0.0015, 0.0015)
@@ -106,6 +115,7 @@ def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_noti
             entry_price = float(trade['entry_price'])
             is_buy = trade['direction'] == 'BUY'
             
+            # حساب الأرباح بناءً على الحجم الفعلي
             if is_buy:
                 price_diff = exit_price - entry_price
             else:
@@ -137,10 +147,11 @@ def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_noti
                 f"{exit_reason} @ {exit_price:.5f} | {pnl_str}"
             )
             
+            # تسجيل في العداد الشهري
             try:
                 monthly_tracker.record_trade(gross_pnl, commission)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"[Monthly Tracker] {e}")
             
             return True
     except Exception as e:
@@ -148,7 +159,7 @@ def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_noti
         return False
 
 def check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker):
-    """التحقق من الصفقات المفتوحة"""
+    """التحقق من الصفقات المفتوحة وإغلاق TP/SL"""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM live_paper_trades WHERE status = 'OPEN'")
@@ -202,6 +213,7 @@ def check_open_positions(prices, conn, capital_manager, telegram_notifier, month
         logger.error(f"[Check Positions Error] {e}")
 
 def strategy_rsi_ema_macd(symbol, bid, ask, price_history):
+    """استراتيجية RSI + EMA + MACD"""
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
     
@@ -221,6 +233,7 @@ def strategy_rsi_ema_macd(symbol, bid, ask, price_history):
     return None
 
 def strategy_bb_stoch_volume(symbol, bid, ask, price_history):
+    """استراتيجية Bollinger + Stochastic"""
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
     
@@ -237,6 +250,7 @@ def strategy_bb_stoch_volume(symbol, bid, ask, price_history):
     return None
 
 def strategy_ema_cross_atr(symbol, bid, ask, price_history):
+    """استراتيجية EMA Crossover + ATR"""
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
     
@@ -255,6 +269,7 @@ def strategy_ema_cross_atr(symbol, bid, ask, price_history):
     return None
 
 def calculate_dynamic_tp_sl(mid_price, is_buy, atr_value):
+    """حساب TP/SL ديناميكي حسب ATR"""
     if atr_value is None:
         atr_value = 0.0005
     
@@ -271,7 +286,7 @@ def calculate_dynamic_tp_sl(mid_price, is_buy, atr_value):
     return sl_price, tp_price
 
 def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn, capital_manager, atr_value=None):
-    """فتح صفقة"""
+    """فتح صفقة جديدة"""
     is_buy = direction == "BUY"
     sl_price, tp_price = calculate_dynamic_tp_sl(entry_price, is_buy, atr_value)
     lot_size = capital_manager.get_optimal_lot_size(entry_price, strategy)
@@ -297,6 +312,7 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
         logger.error(f"[Open Trade Error] {e}")
 
 def main():
+    """الدالة الرئيسية"""
     logger.info("="*60)
     logger.info("🚀 Enhanced Multi-Strategy Scalping Bot")
     logger.info(f"📊 Mode: {'LIVE 🔴' if not cfg.dry_run else 'PAPER TRADING 📝'}")
@@ -304,16 +320,18 @@ def main():
     logger.info(f"⚡ Risk Per Trade: {cfg.capital.risk_per_trade_pct}%")
     logger.info("="*60)
     
+    # تهيئة المديرين والمتتبعات
     capital_manager = CapitalManager(
         database_url=cfg.database_url,
         starting_balance=cfg.capital.starting_balance,
         risk_per_trade=cfg.capital.risk_per_trade_pct
     )
     
-    telegram_notifier = TelegramNotifierV3(cfg.telegram)
+    telegram_notifier = TelegramNotifier(cfg.telegram)
     monthly_tracker = MonthlyTracker()
     price_history = {symbol: PriceHistory(100) for symbol in cfg.risk.target_symbols}
     
+    # إرسال رسالة البدء
     try:
         mode = "LIVE 🔴" if not cfg.dry_run else "PAPER TRADING 📝"
         telegram_notifier.notify_system_event(
@@ -327,18 +345,18 @@ def main():
     
     logger.info("[System] Ready ✅")
     
-    last_report_time = [datetime.now()]
-    
     iteration = 0
     try:
         while True:
             iteration += 1
             prices = generate_prices()
             
+            # الاتصال بقاعدة البيانات والتحقق من الصفقات المفتوحة
             conn = get_db()
             if conn:
                 check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker)
             
+            # فحص كل زوج عملات للاستراتيجيات الثلاث
             for symbol in cfg.risk.target_symbols:
                 if symbol not in prices:
                     continue
@@ -348,16 +366,19 @@ def main():
                 mid = (bid + ask) / 2
                 
                 if bid > 0 and ask > 0:
+                    # Strategy 1: RSI + EMA + MACD
                     signal1 = strategy_rsi_ema_macd(symbol, bid, ask, price_history)
                     if signal1:
                         atr1 = price_history[symbol].get_atr(14)
                         open_trade(symbol, signal1, mid, "RSI_EMA_MACD", telegram_notifier, conn, capital_manager, atr1)
                     
+                    # Strategy 2: Bollinger + Stochastic
                     signal2 = strategy_bb_stoch_volume(symbol, bid, ask, price_history)
                     if signal2:
                         atr2 = price_history[symbol].get_atr(14)
                         open_trade(symbol, signal2, mid, "BB_STOCH", telegram_notifier, conn, capital_manager, atr2)
                     
+                    # Strategy 3: EMA + ATR
                     signal3 = strategy_ema_cross_atr(symbol, bid, ask, price_history)
                     if signal3:
                         atr3 = price_history[symbol].get_atr(14)
@@ -366,7 +387,8 @@ def main():
             if conn:
                 conn.close()
             
-            if iteration % 120 == 0:
+            # طباعة السجل كل دقيقتين
+            if iteration % 4 == 0:
                 logger.info(f"[System] Running... Iteration {iteration}")
             
             time.sleep(30)
