@@ -379,6 +379,3 @@ if __name__ == '__main__':
     main()
 EOF
 
-git add main.py
-git commit -m "feat: integrate real cTrader OpenAPI for live prices and balance"
-git push origin main
