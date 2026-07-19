@@ -1,10 +1,10 @@
 """
-main.py - Enhanced 3 Strategies Scalping Bot with Real cTrader Connection
+main.py - Enhanced 3 Strategies Scalping Bot
 """
 
 import logging
 import time
-import os
+import random
 from collections import deque
 from datetime import datetime
 import psycopg2
@@ -12,7 +12,6 @@ from psycopg2.extras import RealDictCursor
 
 from config import Config
 from capital_manager import CapitalManager
-from ctrader_connector import CTraderConnector
 from telegram_notifier import TelegramNotifierV3
 from monthly_tracker import MonthlyTracker
 
@@ -20,6 +19,13 @@ logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger("forex_bot")
 
 cfg = Config()
+
+DEFAULT_PRICES = {
+    "EURUSD": 1.0850,
+    "GBPUSD": 1.2750,
+    "USDJPY": 149.50,
+    "AUDUSD": 0.6580
+}
 
 class PriceHistory:
     def __init__(self, max_size=100):
@@ -78,9 +84,17 @@ def get_db():
         logger.error(f"[DB Error] {e}")
         return None
 
+def generate_prices():
+    prices = {}
+    for symbol, base_price in DEFAULT_PRICES.items():
+        change = random.uniform(-0.0015, 0.0015)
+        bid = base_price + change
+        ask = bid + 0.0005
+        prices[symbol] = {"bid": bid, "ask": ask}
+    return prices
+
 def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker):
     if not conn:
-        logger.error(f"[Close Trade] No database connection")
         return False
     
     try:
@@ -105,24 +119,14 @@ def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_noti
             
             cur.execute("""
                 UPDATE live_paper_trades 
-                SET status = 'CLOSED', 
-                    exit_price = %s, 
-                    exit_reason = %s, 
-                    gross_pnl = %s,
-                    commission = %s,
-                    net_pnl = %s,
-                    closed_at = NOW()
+                SET status = 'CLOSED', exit_price = %s, exit_reason = %s, 
+                    gross_pnl = %s, commission = %s, net_pnl = %s, closed_at = NOW()
                 WHERE id = %s
             """, (exit_price, exit_reason, gross_pnl, commission, net_pnl, trade_id))
             
             conn.commit()
-            
             pnl_str = f"+${net_pnl:.2f}" if net_pnl > 0 else f"-${abs(net_pnl):.2f}"
-            strategy = trade['strategy'] if trade['strategy'] else 'UNKNOWN'
-            logger.info(
-                f"[{strategy}] CLOSE #{trade_id} {trade['symbol']} "
-                f"{exit_reason} @ {exit_price:.5f} | {pnl_str}"
-            )
+            logger.info(f"[CLOSE] #{trade_id} {trade['symbol']} {exit_reason} @ {exit_price:.5f} | {pnl_str}")
             
             try:
                 monthly_tracker.record_trade(gross_pnl, commission)
@@ -146,8 +150,6 @@ def check_open_positions(prices, conn, capital_manager, telegram_notifier, month
         
         for trade in open_trades:
             symbol = trade['symbol']
-            trade_id = trade['id']
-            
             if symbol not in prices:
                 continue
             
@@ -158,9 +160,8 @@ def check_open_positions(prices, conn, capital_manager, telegram_notifier, month
             sl_price = float(trade['sl_price'])
             tp_price = float(trade['tp_price'])
             is_buy = trade['direction'] == 'BUY'
-            entry_price = float(trade['entry_price'])
             
-            lot_size = capital_manager.get_optimal_lot_size(entry_price, trade['strategy'])
+            lot_size = capital_manager.get_optimal_lot_size(float(trade['entry_price']), trade['strategy'])
             
             should_close = False
             exit_reason = None
@@ -168,33 +169,24 @@ def check_open_positions(prices, conn, capital_manager, telegram_notifier, month
             
             if is_buy:
                 if mid >= tp_price:
-                    should_close = True
-                    exit_reason = "TAKE_PROFIT"
-                    exit_price = tp_price
+                    should_close, exit_reason, exit_price = True, "TAKE_PROFIT", tp_price
                 elif mid <= sl_price:
-                    should_close = True
-                    exit_reason = "STOP_LOSS"
-                    exit_price = sl_price
+                    should_close, exit_reason, exit_price = True, "STOP_LOSS", sl_price
             else:
                 if mid <= tp_price:
-                    should_close = True
-                    exit_reason = "TAKE_PROFIT"
-                    exit_price = tp_price
+                    should_close, exit_reason, exit_price = True, "TAKE_PROFIT", tp_price
                 elif mid >= sl_price:
-                    should_close = True
-                    exit_reason = "STOP_LOSS"
-                    exit_price = sl_price
+                    should_close, exit_reason, exit_price = True, "STOP_LOSS", sl_price
             
             if should_close:
-                close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker)
+                close_trade(trade['id'], exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker)
     
     except Exception as e:
-        logger.error(f"[Check Positions Error] {e}")
+        logger.error(f"[Check Positions] {e}")
 
 def strategy_rsi_ema_macd(symbol, bid, ask, price_history):
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
-    
     rsi = price_history[symbol].get_rsi(14)
     ema5 = price_history[symbol].get_ema(5)
     ema10 = price_history[symbol].get_ema(10)
@@ -202,62 +194,49 @@ def strategy_rsi_ema_macd(symbol, bid, ask, price_history):
     
     if rsi is None or ema5 is None or ema10 is None or macd is None:
         return None
-    
     if rsi < 30 and ema5 > ema10 and macd > 0:
         return "BUY"
     elif rsi > 70 and ema5 < ema10 and macd < 0:
         return "SELL"
-    
     return None
 
 def strategy_bb_stoch_volume(symbol, bid, ask, price_history):
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
-    
     stoch = price_history[symbol].get_stochastic(5)
-    
     if stoch is None:
         return None
-    
     if stoch < 20:
         return "BUY"
     elif stoch > 80:
         return "SELL"
-    
     return None
 
 def strategy_ema_cross_atr(symbol, bid, ask, price_history):
     mid = (bid + ask) / 2
     price_history[symbol].add(mid)
-    
     ema5 = price_history[symbol].get_ema(5)
     ema10 = price_history[symbol].get_ema(10)
     ema20 = price_history[symbol].get_ema(20)
-    
     if ema5 is None or ema10 is None or ema20 is None:
         return None
-    
     if ema5 > ema10 > ema20:
         return "BUY"
     elif ema5 < ema10 < ema20:
         return "SELL"
-    
     return None
 
 def calculate_dynamic_tp_sl(mid_price, is_buy, atr_value):
     if atr_value is None:
         atr_value = 0.0005
-    
     sl_distance = atr_value * 1.5
     tp_distance = atr_value * 2.5
-    
     if is_buy:
         sl_price = mid_price - sl_distance
         tp_price = mid_price + tp_distance
     else:
         sl_price = mid_price + sl_distance
         tp_price = mid_price - tp_distance
-    
     return sl_price, tp_price
 
 def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn, capital_manager, atr_value=None):
@@ -266,7 +245,6 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
     lot_size = capital_manager.get_optimal_lot_size(entry_price, strategy)
     
     if not conn:
-        logger.error(f"[Open Trade] No database connection")
         return
     
     try:
@@ -277,132 +255,70 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
                 VALUES (%s, %s, %s, %s, %s, 'OPEN', %s, NOW())
                 RETURNING id
             """, (symbol, direction, entry_price, sl_price, tp_price, strategy))
-            
             trade_id = cur.fetchone()[0]
             conn.commit()
-            
-            logger.info(
-                f"[{strategy}] OPEN #{trade_id} {symbol} {direction} "
-                f"{lot_size} lots @ {entry_price:.5f} TP:{tp_price:.5f} SL:{sl_price:.5f}"
-            )
-    
+            logger.info(f"[OPEN] #{trade_id} {symbol} {direction} {lot_size} lots @ {entry_price:.5f} TP:{tp_price:.5f} SL:{sl_price:.5f}")
     except Exception as e:
         try:
             conn.rollback()
         except:
             pass
-        logger.error(f"[Open Trade Error] {e}")
+        logger.error(f"[Open Error] {e}")
 
 def main():
     logger.info("="*60)
-    logger.info("🚀 Enhanced Multi-Strategy Scalping Bot")
-    logger.info(f"📊 Mode: {'LIVE 🔴' if not cfg.dry_run else 'PAPER TRADING 📝'}")
-    logger.info(f"💰 Risk Per Trade: {cfg.capital.risk_per_trade_pct}%")
-    logger.info(f"📈 Lot Size Multiplier: {cfg.capital.lot_size_multiplier}x")
+    logger.info("🚀 Forex Bot")
+    logger.info(f"📊 Mode: PAPER TRADING 📝")
     logger.info("="*60)
-    
-    # الاتصال مع cTrader إذا كان مفعلاً
-    ctrader_connector = None
-    if cfg.ctrader.enabled:
-        logger.info("[cTrader] Attempting connection...")
-        ctrader_connector = CTraderConnector(
-            client_id=cfg.ctrader.client_id,
-            account_id=cfg.ctrader.account_id,
-            fix_host=cfg.ctrader.fix_host,
-            fix_port=cfg.ctrader.fix_port,
-            fix_username=cfg.ctrader.fix_username
-        )
-        if ctrader_connector.connect():
-            logger.info("[cTrader] ✅ Connected successfully")
-        else:
-            logger.warning("[cTrader] ⚠️ Connection failed - using simulated prices")
-            ctrader_connector = None
-    else:
-        logger.warning("[cTrader] ⚠️ Not configured - using simulated prices")
     
     capital_manager = CapitalManager(
         database_url=cfg.database_url,
         starting_balance=cfg.capital.starting_balance,
         risk_per_trade=cfg.capital.risk_per_trade_pct,
         lot_size_multiplier=cfg.capital.lot_size_multiplier,
-        ctrader_connector=ctrader_connector
+        ctrader_connector=None
     )
     
     telegram_notifier = TelegramNotifierV3(cfg.telegram)
     monthly_tracker = MonthlyTracker()
     price_history = {symbol: PriceHistory(100) for symbol in cfg.risk.target_symbols}
     
-    # الأسعار الافتراضية للمحاكاة
-    DEFAULT_PRICES = {
-        "EURUSD": 1.0850,
-        "GBPUSD": 1.2750,
-        "USDJPY": 149.50,
-        "AUDUSD": 0.6580
-    }
-    
     try:
-        mode = "LIVE 🔴" if not cfg.dry_run else "PAPER TRADING 📝"
-        telegram_notifier.notify_system_event(
-            f"🚀 Bot Started\n"
-            f"📌 3 Improved Strategies\n"
-            f"🔒 Mode: {mode}"
-        )
-    except Exception as e:
-        logger.warning(f"[Telegram] {e}")
+        telegram_notifier.notify_system_event("🚀 Bot Started - PAPER TRADING")
+    except:
+        pass
     
     logger.info("[System] Ready ✅")
-    
     iteration = 0
+    
     try:
         while True:
             iteration += 1
-            
-            # قراءة الأسعار من cTrader أو المحاكاة
-            if ctrader_connector and ctrader_connector.is_connected():
-                prices = ctrader_connector.prices_cache.copy()
-                if not prices:
-                    prices = DEFAULT_PRICES.copy()
-            else:
-                # محاكاة الأسعار
-                import random
-                prices = {}
-                for symbol, base_price in DEFAULT_PRICES.items():
-                    change = random.uniform(-0.0015, 0.0015)
-                    bid = base_price + change
-                    ask = bid + 0.0005
-                    prices[symbol] = {"bid": bid, "ask": ask}
+            prices = generate_prices()
             
             conn = None
             try:
                 conn = get_db()
                 if conn:
                     check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker)
-                    
                     for symbol in cfg.risk.target_symbols:
                         if symbol not in prices:
                             continue
-                        
                         bid = prices[symbol]['bid']
                         ask = prices[symbol]['ask']
                         mid = (bid + ask) / 2
-                        
                         if bid > 0 and ask > 0:
                             signal1 = strategy_rsi_ema_macd(symbol, bid, ask, price_history)
                             if signal1:
-                                atr1 = price_history[symbol].get_atr(14)
-                                open_trade(symbol, signal1, mid, "RSI_EMA_MACD", telegram_notifier, conn, capital_manager, atr1)
-                            
+                                open_trade(symbol, signal1, mid, "RSI_EMA_MACD", telegram_notifier, conn, capital_manager, price_history[symbol].get_atr(14))
                             signal2 = strategy_bb_stoch_volume(symbol, bid, ask, price_history)
                             if signal2:
-                                atr2 = price_history[symbol].get_atr(14)
-                                open_trade(symbol, signal2, mid, "BB_STOCH", telegram_notifier, conn, capital_manager, atr2)
-                            
+                                open_trade(symbol, signal2, mid, "BB_STOCH", telegram_notifier, conn, capital_manager, price_history[symbol].get_atr(14))
                             signal3 = strategy_ema_cross_atr(symbol, bid, ask, price_history)
                             if signal3:
-                                atr3 = price_history[symbol].get_atr(14)
-                                open_trade(symbol, signal3, mid, "EMA_ATR", telegram_notifier, conn, capital_manager, atr3)
+                                open_trade(symbol, signal3, mid, "EMA_ATR", telegram_notifier, conn, capital_manager, price_history[symbol].get_atr(14))
             except Exception as e:
-                logger.error(f"[Iteration Error] {e}")
+                logger.error(f"[Error] {e}")
             finally:
                 if conn:
                     try:
@@ -412,25 +328,12 @@ def main():
             
             if iteration % 120 == 0:
                 logger.info(f"[System] Running... Iteration {iteration}")
-            
             time.sleep(30)
     
     except KeyboardInterrupt:
-        logger.info("⏹️ Stopping...")
-        if ctrader_connector:
-            ctrader_connector.disconnect()
-        try:
-            telegram_notifier.notify_system_event("⏹️ Bot Stopped")
-        except Exception as e:
-            logger.warning(f"[Telegram] {e}")
+        logger.info("⏹️ Stopped")
     except Exception as e:
-        logger.critical(f"[Fatal Error] {e}")
-        if ctrader_connector:
-            ctrader_connector.disconnect()
-        try:
-            telegram_notifier.notify_system_event(f"💥 Error: {e}")
-        except Exception as ex:
-            logger.warning(f"[Telegram] {ex}")
+        logger.critical(f"[Fatal] {e}")
 
 if __name__ == '__main__':
     main()
