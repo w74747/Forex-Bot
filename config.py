@@ -1,5 +1,5 @@
 """
-config.py - Configuration Management
+config.py - Configuration
 """
 
 import os
@@ -21,10 +21,10 @@ class CapitalConfig:
 class CTraderConfig:
     client_id = os.getenv('CTRADER_CLIENT_ID', '')
     account_id = os.getenv('CTRADER_ACCOUNT_ID', '')
-    fix_host = os.getenv('CTRADER_FIX_HOST', 'demo-uk-eqx-01.p.c-trader.com')
-    fix_port = int(os.getenv('CTRADER_FIX_PORT', 5212))
-    fix_username = os.getenv('CTRADER_FIX_USERNAME', '')
-    enabled = bool(client_id and account_id and fix_username)
+    username = os.getenv('CTRADER_FIX_USERNAME', '')
+    password = os.getenv('CTRADER_FIX_PASSWORD', '')
+    access_token = os.getenv('CTRADER_ACCESS_TOKEN', '')
+    enabled = bool(client_id and account_id and username and password)
 
 class RiskConfig:
     target_symbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD']
@@ -38,4 +38,4 @@ class Config:
         self.ctrader = CTraderConfig()
         self.risk = RiskConfig()
         self.database_url = os.getenv('DATABASE_URL', '')
-        self.dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
+        self.dry_run = os.getenv('DRY_RUN', 'false').lower() == 'true'
