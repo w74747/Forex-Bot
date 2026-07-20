@@ -1,5 +1,5 @@
 """
-main.py - Enhanced 3 Strategies Scalping Bot
+main.py - Forex Trading Bot
 """
 
 import logging
@@ -40,8 +40,8 @@ class PriceHistory:
         prices = list(self.prices)[-period:]
         gains = sum(prices[i] - prices[i-1] for i in range(1, len(prices)) if prices[i] > prices[i-1])
         losses = sum(prices[i-1] - prices[i] for i in range(1, len(prices)) if prices[i] < prices[i-1])
-        avg_gain = gains / period
-        avg_loss = losses / period
+        avg_gain = gains / period if gains > 0 else 0
+        avg_loss = losses / period if losses > 0 else 0
         if avg_loss == 0:
             return 100 if avg_gain > 0 else 0
         rs = avg_gain / avg_loss
@@ -93,7 +93,7 @@ def generate_prices():
         prices[symbol] = {"bid": bid, "ask": ask}
     return prices
 
-def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker):
+def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, capital_manager, monthly_tracker):
     if not conn:
         return False
     
@@ -126,7 +126,8 @@ def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_noti
             
             conn.commit()
             pnl_str = f"+${net_pnl:.2f}" if net_pnl > 0 else f"-${abs(net_pnl):.2f}"
-            logger.info(f"[CLOSE] #{trade_id} {trade['symbol']} {exit_reason} @ {exit_price:.5f} | {pnl_str}")
+            strategy = trade['strategy'] if trade['strategy'] else 'UNKNOWN'
+            logger.info(f"[{strategy}] CLOSE #{trade_id} {trade['symbol']} {exit_reason} @ {exit_price:.5f} | {pnl_str}")
             
             try:
                 monthly_tracker.record_trade(gross_pnl, commission)
@@ -142,7 +143,7 @@ def close_trade(trade_id, exit_price, exit_reason, conn, lot_size, telegram_noti
         logger.error(f"[Close Error] {e}")
         return False
 
-def check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker):
+def check_open_positions(prices, conn, capital_manager, monthly_tracker):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM live_paper_trades WHERE status = 'OPEN'")
@@ -179,7 +180,7 @@ def check_open_positions(prices, conn, capital_manager, telegram_notifier, month
                     should_close, exit_reason, exit_price = True, "STOP_LOSS", sl_price
             
             if should_close:
-                close_trade(trade['id'], exit_price, exit_reason, conn, lot_size, telegram_notifier, capital_manager, monthly_tracker)
+                close_trade(trade['id'], exit_price, exit_reason, conn, lot_size, capital_manager, monthly_tracker)
     
     except Exception as e:
         logger.error(f"[Check Positions] {e}")
@@ -229,19 +230,21 @@ def strategy_ema_cross_atr(symbol, bid, ask, price_history):
 def calculate_dynamic_tp_sl(mid_price, is_buy, atr_value):
     if atr_value is None:
         atr_value = 0.0005
-    sl_distance = atr_value * 1.5
-    tp_distance = atr_value * 2.5
+    sl_distance = atr_value * 1.0
+    tp_distance = sl_distance * 2.0
+    
     if is_buy:
         sl_price = mid_price - sl_distance
         tp_price = mid_price + tp_distance
     else:
         sl_price = mid_price + sl_distance
         tp_price = mid_price - tp_distance
+    
     return sl_price, tp_price
 
-def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn, capital_manager, atr_value=None):
+def open_trade(symbol, direction, entry_price, strategy, conn, capital_manager):
     is_buy = direction == "BUY"
-    sl_price, tp_price = calculate_dynamic_tp_sl(entry_price, is_buy, atr_value)
+    sl_price, tp_price = calculate_dynamic_tp_sl(entry_price, is_buy, None)
     lot_size = capital_manager.get_optimal_lot_size(entry_price, strategy)
     
     if not conn:
@@ -257,7 +260,7 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
             """, (symbol, direction, entry_price, sl_price, tp_price, strategy))
             trade_id = cur.fetchone()[0]
             conn.commit()
-            logger.info(f"[OPEN] #{trade_id} {symbol} {direction} {lot_size} lots @ {entry_price:.5f} TP:{tp_price:.5f} SL:{sl_price:.5f}")
+            logger.info(f"[{strategy}] OPEN #{trade_id} {symbol} {direction} {lot_size} lots @ {entry_price:.5f} TP:{tp_price:.5f} SL:{sl_price:.5f}")
     except Exception as e:
         try:
             conn.rollback()
@@ -267,8 +270,10 @@ def open_trade(symbol, direction, entry_price, strategy, telegram_notifier, conn
 
 def main():
     logger.info("="*60)
-    logger.info("🚀 Forex Bot")
+    logger.info("🚀 Forex Trading Bot")
     logger.info(f"📊 Mode: PAPER TRADING 📝")
+    logger.info(f"💰 Risk Per Trade: {cfg.capital.risk_per_trade_pct}%")
+    logger.info(f"📈 Lot Size Multiplier: {cfg.capital.lot_size_multiplier}x")
     logger.info("="*60)
     
     capital_manager = CapitalManager(
@@ -300,7 +305,7 @@ def main():
             try:
                 conn = get_db()
                 if conn:
-                    check_open_positions(prices, conn, capital_manager, telegram_notifier, monthly_tracker)
+                    check_open_positions(prices, conn, capital_manager, monthly_tracker)
                     for symbol in cfg.risk.target_symbols:
                         if symbol not in prices:
                             continue
@@ -310,13 +315,13 @@ def main():
                         if bid > 0 and ask > 0:
                             signal1 = strategy_rsi_ema_macd(symbol, bid, ask, price_history)
                             if signal1:
-                                open_trade(symbol, signal1, mid, "RSI_EMA_MACD", telegram_notifier, conn, capital_manager, price_history[symbol].get_atr(14))
+                                open_trade(symbol, signal1, mid, "RSI_EMA_MACD", conn, capital_manager)
                             signal2 = strategy_bb_stoch_volume(symbol, bid, ask, price_history)
                             if signal2:
-                                open_trade(symbol, signal2, mid, "BB_STOCH", telegram_notifier, conn, capital_manager, price_history[symbol].get_atr(14))
+                                open_trade(symbol, signal2, mid, "BB_STOCH", conn, capital_manager)
                             signal3 = strategy_ema_cross_atr(symbol, bid, ask, price_history)
                             if signal3:
-                                open_trade(symbol, signal3, mid, "EMA_ATR", telegram_notifier, conn, capital_manager, price_history[symbol].get_atr(14))
+                                open_trade(symbol, signal3, mid, "EMA_ATR", conn, capital_manager)
             except Exception as e:
                 logger.error(f"[Error] {e}")
             finally:
