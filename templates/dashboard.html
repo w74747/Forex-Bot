@@ -10,16 +10,22 @@
         h1 { color: #333; margin-bottom: 20px; }
         .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px; }
         .stat { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .stat-label { font-size: 12px; color: #999; text-transform: uppercase; }
-        .stat-value { font-size: 24px; font-weight: bold; color: #333; margin-top: 10px; }
+        .stat-label { font-size: 12px; color: #999; }
+        .stat-value { font-size: 24px; font-weight: bold; margin-top: 10px; }
         .stat-value.positive { color: #10b981; }
         .stat-value.negative { color: #ef4444; }
-        table { width: 100%; background: white; border-collapse: collapse; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        th { background: #f8f9fa; padding: 12px; text-align: left; font-weight: 600; font-size: 12px; }
+        .filters { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; align-items: flex-end; }
+        input { padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px 20px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #5568d3; }
+        table { width: 100%; background: white; border-collapse: collapse; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        th { background: #f8f9fa; padding: 12px; text-align: left; font-weight: 600; }
         td { padding: 12px; border-bottom: 1px solid #e9ecef; }
         tr:hover { background: #f8f9fa; }
-        .loading { text-align: center; padding: 40px; color: #999; }
-        .error { color: red; padding: 20px; }
+        .pagination { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
+        .pagination button { background: #ddd; color: #333; }
+        .pagination button.active { background: #667eea; color: white; }
+        .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -45,6 +51,12 @@
             </div>
         </div>
         
+        <div class="filters">
+            <input type="date" id="from-date" placeholder="From Date">
+            <input type="date" id="to-date" placeholder="To Date">
+            <button onclick="loadTrades(1)">Search</button>
+        </div>
+        
         <h2>Recent Trades</h2>
         <table>
             <thead>
@@ -54,65 +66,92 @@
                     <th>Direction</th>
                     <th>Entry</th>
                     <th>Exit</th>
-                    <th>Status</th>
                     <th>P&L</th>
                     <th>Strategy</th>
+                    <th>Date</th>
                 </tr>
             </thead>
             <tbody id="trades">
-                <tr><td colspan="8" class="loading">Loading trades...</td></tr>
+                <tr><td colspan="8" style="text-align: center; padding: 20px;">Loading...</td></tr>
             </tbody>
         </table>
+        
+        <div class="pagination" id="pagination"></div>
     </div>
 
     <script>
-        async function loadData() {
+        async function loadStats() {
             try {
-                // Load stats
-                const statsRes = await fetch('/api/stats');
-                const stats = await statsRes.json();
+                const res = await fetch('/api/stats');
+                const stats = await res.json();
                 
                 document.getElementById('start-bal').innerText = '$' + (stats.starting_balance || 200).toFixed(2);
                 document.getElementById('curr-bal').innerText = '$' + (stats.current_balance || 200).toFixed(2);
                 document.getElementById('total-pnl').innerText = '$' + (stats.total_pnl || 0).toFixed(2);
                 document.getElementById('win-rate').innerText = (stats.win_rate || 0).toFixed(1) + '%';
+            } catch (e) {
+                console.error('Error loading stats:', e);
+            }
+        }
+        
+        async function loadTrades(page = 1) {
+            try {
+                const fromDate = document.getElementById('from-date').value;
+                const toDate = document.getElementById('to-date').value;
                 
-                // Add color
-                const pnlElem = document.getElementById('total-pnl');
-                pnlElem.className = (stats.total_pnl >= 0) ? 'stat-value positive' : 'stat-value negative';
+                let url = `/api/trades?page=${page}`;
+                if (fromDate) url += `&from_date=${fromDate}`;
+                if (toDate) url += `&to_date=${toDate}`;
                 
-                // Load trades
-                const tradesRes = await fetch('/api/trades');
-                const trades = await tradesRes.json();
+                const res = await fetch(url);
+                const data = await res.json();
                 
-                const tbody = document.getElementById('trades');
-                if (!trades || trades.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="8" class="loading">No trades yet</td></tr>';
+                if (!data.trades || data.trades.length === 0) {
+                    document.getElementById('trades').innerHTML = '<tr><td colspan="8" style="text-align: center;">No trades found</td></tr>';
+                    document.getElementById('pagination').innerHTML = '';
                     return;
                 }
                 
-                tbody.innerHTML = trades.map(t => `
+                document.getElementById('trades').innerHTML = data.trades.map(t => `
                     <tr>
                         <td>${t.id}</td>
                         <td>${t.symbol}</td>
                         <td style="color: ${t.direction === 'BUY' ? '#10b981' : '#ef4444'}; font-weight: bold;">${t.direction}</td>
                         <td>${parseFloat(t.entry_price || 0).toFixed(5)}</td>
                         <td>${t.exit_price ? parseFloat(t.exit_price).toFixed(5) : '-'}</td>
-                        <td>${t.status}</td>
                         <td style="color: ${(t.net_pnl || 0) >= 0 ? '#10b981' : '#ef4444'}; font-weight: bold;">
                             ${t.net_pnl ? (t.net_pnl >= 0 ? '+' : '') + parseFloat(t.net_pnl).toFixed(2) : '-'}
                         </td>
                         <td>${t.strategy || '-'}</td>
+                        <td>${t.closed_at.substring(0, 19)}</td>
                     </tr>
                 `).join('');
-            } catch (error) {
-                console.error('Error:', error);
-                document.getElementById('trades').innerHTML = '<tr><td colspan="8" class="error">Error loading data</td></tr>';
+                
+                // Pagination
+                let paginationHTML = '';
+                if (data.page > 1) {
+                    paginationHTML += `<button onclick="loadTrades(1)">First</button>`;
+                    paginationHTML += `<button onclick="loadTrades(${data.page - 1})">Prev</button>`;
+                }
+                
+                for (let i = Math.max(1, data.page - 2); i <= Math.min(data.total_pages, data.page + 2); i++) {
+                    paginationHTML += `<button class="${i === data.page ? 'active' : ''}" onclick="loadTrades(${i})">${i}</button>`;
+                }
+                
+                if (data.page < data.total_pages) {
+                    paginationHTML += `<button onclick="loadTrades(${data.page + 1})">Next</button>`;
+                    paginationHTML += `<button onclick="loadTrades(${data.total_pages})">Last</button>`;
+                }
+                
+                document.getElementById('pagination').innerHTML = paginationHTML;
+            } catch (e) {
+                console.error('Error loading trades:', e);
             }
         }
         
-        loadData();
-        setInterval(loadData, 5000);
+        loadStats();
+        loadTrades(1);
+        setInterval(loadStats, 10000);
     </script>
 </body>
 </html>
