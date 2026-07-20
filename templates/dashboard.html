@@ -1,139 +1,118 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Forex Trading Dashboard</title>
+    <title>Forex Bot Dashboard</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #333; min-height: 100vh; padding: 20px; }
-        .container { max-width: 1400px; margin: 0 auto; }
-        header { background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #667eea; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .stat-card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
-        .stat-label { color: #666; font-size: 12px; text-transform: uppercase; margin-bottom: 10px; }
-        .stat-value { font-size: 28px; font-weight: bold; color: #333; }
+        body { font-family: Arial; background: #f5f5f5; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { color: #333; margin-bottom: 20px; }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px; }
+        .stat { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .stat-label { font-size: 12px; color: #999; text-transform: uppercase; }
+        .stat-value { font-size: 24px; font-weight: bold; color: #333; margin-top: 10px; }
         .stat-value.positive { color: #10b981; }
         .stat-value.negative { color: #ef4444; }
-        .trades-section { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .trades-section h2 { margin-bottom: 20px; font-size: 18px; }
-        .trades-table { width: 100%; border-collapse: collapse; }
-        .trades-table thead { background: #f8f9fa; border-bottom: 2px solid #e9ecef; }
-        .trades-table th { padding: 12px 8px; text-align: left; font-weight: 600; color: #666; font-size: 12px; text-transform: uppercase; }
-        .trades-table td { padding: 12px 8px; border-bottom: 1px solid #e9ecef; }
-        .trades-table tr:hover { background: #f8f9fa; }
-        .loading { text-align: center; padding: 20px; color: #666; }
-        .error { color: #ef4444; }
+        table { width: 100%; background: white; border-collapse: collapse; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        th { background: #f8f9fa; padding: 12px; text-align: left; font-weight: 600; font-size: 12px; }
+        td { padding: 12px; border-bottom: 1px solid #e9ecef; }
+        tr:hover { background: #f8f9fa; }
+        .loading { text-align: center; padding: 40px; color: #999; }
+        .error { color: red; padding: 20px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <header>
-            <h1>📊 Forex Trading Bot Dashboard</h1>
-            <p>Real-time trading performance</p>
-        </header>
+        <h1>📊 Forex Trading Bot Dashboard</h1>
         
-        <div class="stats-grid" id="statsGrid">
-            <div class="loading">Loading stats...</div>
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-label">Starting Balance</div>
+                <div class="stat-value" id="start-bal">$200.00</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Current Balance</div>
+                <div class="stat-value" id="curr-bal">$200.00</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Total P&L</div>
+                <div class="stat-value" id="total-pnl">$0.00</div>
+            </div>
+            <div class="stat">
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value" id="win-rate">0%</div>
+            </div>
         </div>
         
-        <div class="trades-section">
-            <h2>Recent Trades</h2>
-            <table class="trades-table">
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Symbol</th>
-                        <th>Direction</th>
-                        <th>Entry</th>
-                        <th>Exit</th>
-                        <th>Status</th>
-                        <th>P&L</th>
-                        <th>Strategy</th>
-                    </tr>
-                </thead>
-                <tbody id="tradesBody">
-                    <tr><td colspan="8" class="loading">Loading trades...</td></tr>
-                </tbody>
-            </table>
-        </div>
+        <h2>Recent Trades</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Symbol</th>
+                    <th>Direction</th>
+                    <th>Entry</th>
+                    <th>Exit</th>
+                    <th>Status</th>
+                    <th>P&L</th>
+                    <th>Strategy</th>
+                </tr>
+            </thead>
+            <tbody id="trades">
+                <tr><td colspan="8" class="loading">Loading trades...</td></tr>
+            </tbody>
+        </table>
     </div>
 
     <script>
-        async function loadStats() {
+        async function loadData() {
             try {
-                const response = await fetch('/api/stats');
-                const stats = await response.json();
+                // Load stats
+                const statsRes = await fetch('/api/stats');
+                const stats = await statsRes.json();
                 
-                const statsGrid = document.getElementById('statsGrid');
-                statsGrid.innerHTML = `
-                    <div class="stat-card">
-                        <div class="stat-label">Starting Balance</div>
-                        <div class="stat-value">$${(stats.starting_balance || 200).toFixed(2)}</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Current Balance</div>
-                        <div class="stat-value ${(stats.current_balance || 0) >= (stats.starting_balance || 200) ? 'positive' : 'negative'}">
-                            $${(stats.current_balance || 200).toFixed(2)}
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Total P&L</div>
-                        <div class="stat-value ${(stats.total_pnl || 0) >= 0 ? 'positive' : 'negative'}">
-                            ${(stats.total_pnl || 0) >= 0 ? '+' : ''}$${(stats.total_pnl || 0).toFixed(2)}
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Win Rate</div>
-                        <div class="stat-value">${(stats.win_rate || 0).toFixed(1)}%</div>
-                    </div>
-                `;
-            } catch (error) {
-                console.error('Error loading stats:', error);
-            }
-        }
-        
-        async function loadTrades() {
-            try {
-                const response = await fetch('/api/trades');
-                const trades = await response.json();
+                document.getElementById('start-bal').innerText = '$' + (stats.starting_balance || 200).toFixed(2);
+                document.getElementById('curr-bal').innerText = '$' + (stats.current_balance || 200).toFixed(2);
+                document.getElementById('total-pnl').innerText = '$' + (stats.total_pnl || 0).toFixed(2);
+                document.getElementById('win-rate').innerText = (stats.win_rate || 0).toFixed(1) + '%';
                 
-                if (!Array.isArray(trades) || trades.length === 0) {
-                    document.getElementById('tradesBody').innerHTML = '<tr><td colspan="8" class="loading">No trades yet</td></tr>';
+                // Add color
+                const pnlElem = document.getElementById('total-pnl');
+                pnlElem.className = (stats.total_pnl >= 0) ? 'stat-value positive' : 'stat-value negative';
+                
+                // Load trades
+                const tradesRes = await fetch('/api/trades');
+                const trades = await tradesRes.json();
+                
+                const tbody = document.getElementById('trades');
+                if (!trades || trades.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="loading">No trades yet</td></tr>';
                     return;
                 }
                 
-                const html = trades.map(trade => `
+                tbody.innerHTML = trades.map(t => `
                     <tr>
-                        <td>${trade.id || '-'}</td>
-                        <td>${trade.symbol || '-'}</td>
-                        <td style="color: ${trade.direction === 'BUY' ? '#10b981' : '#ef4444'}; font-weight: 600;">${trade.direction || '-'}</td>
-                        <td>${parseFloat(trade.entry_price || 0).toFixed(5)}</td>
-                        <td>${trade.exit_price ? parseFloat(trade.exit_price).toFixed(5) : '-'}</td>
-                        <td>${trade.status || '-'}</td>
-                        <td style="color: ${(trade.net_pnl || 0) >= 0 ? '#10b981' : '#ef4444'}; font-weight: 600;">
-                            ${trade.net_pnl ? (trade.net_pnl >= 0 ? '+' : '') + parseFloat(trade.net_pnl).toFixed(2) : '-'}
+                        <td>${t.id}</td>
+                        <td>${t.symbol}</td>
+                        <td style="color: ${t.direction === 'BUY' ? '#10b981' : '#ef4444'}; font-weight: bold;">${t.direction}</td>
+                        <td>${parseFloat(t.entry_price || 0).toFixed(5)}</td>
+                        <td>${t.exit_price ? parseFloat(t.exit_price).toFixed(5) : '-'}</td>
+                        <td>${t.status}</td>
+                        <td style="color: ${(t.net_pnl || 0) >= 0 ? '#10b981' : '#ef4444'}; font-weight: bold;">
+                            ${t.net_pnl ? (t.net_pnl >= 0 ? '+' : '') + parseFloat(t.net_pnl).toFixed(2) : '-'}
                         </td>
-                        <td>${trade.strategy || '-'}</td>
+                        <td>${t.strategy || '-'}</td>
                     </tr>
                 `).join('');
-                
-                document.getElementById('tradesBody').innerHTML = html;
             } catch (error) {
-                console.error('Error loading trades:', error);
-                document.getElementById('tradesBody').innerHTML = '<tr><td colspan="8" class="error">Failed to load trades</td></tr>';
+                console.error('Error:', error);
+                document.getElementById('trades').innerHTML = '<tr><td colspan="8" class="error">Error loading data</td></tr>';
             }
         }
         
-        document.addEventListener('DOMContentLoaded', () => {
-            loadStats();
-            loadTrades();
-            setInterval(() => {
-                loadStats();
-                loadTrades();
-            }, 5000);
-        });
+        loadData();
+        setInterval(loadData, 5000);
     </script>
 </body>
 </html>
