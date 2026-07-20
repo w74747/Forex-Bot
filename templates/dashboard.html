@@ -5,284 +5,61 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Forex Trading Dashboard</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #333;
-            min-height: 100vh;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-        
-        header {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        
-        h1 {
-            color: #667eea;
-            margin-bottom: 10px;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 20px;
-        }
-        
-        .stat-card {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            text-align: center;
-        }
-        
-        .stat-label {
-            color: #666;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 10px;
-        }
-        
-        .stat-value {
-            font-size: 28px;
-            font-weight: bold;
-            color: #333;
-        }
-        
-        .stat-value.positive {
-            color: #10b981;
-        }
-        
-        .stat-value.negative {
-            color: #ef4444;
-        }
-        
-        .main-content {
-            display: grid;
-            grid-template-columns: 1fr 300px;
-            gap: 20px;
-        }
-        
-        .trades-section {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        
-        .trades-section h2 {
-            margin-bottom: 20px;
-            color: #333;
-            font-size: 18px;
-        }
-        
-        .trades-table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        
-        .trades-table thead {
-            background: #f8f9fa;
-            border-bottom: 2px solid #e9ecef;
-        }
-        
-        .trades-table th {
-            padding: 12px 8px;
-            text-align: left;
-            font-weight: 600;
-            color: #666;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .trades-table td {
-            padding: 12px 8px;
-            border-bottom: 1px solid #e9ecef;
-        }
-        
-        .trades-table tr:hover {
-            background: #f8f9fa;
-        }
-        
-        .symbol {
-            font-weight: 600;
-            color: #333;
-        }
-        
-        .buy {
-            color: #10b981;
-            font-weight: 600;
-        }
-        
-        .sell {
-            color: #ef4444;
-            font-weight: 600;
-        }
-        
-        .closed {
-            background: #f0fdf4;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            color: #065f46;
-            font-weight: 600;
-        }
-        
-        .open {
-            background: #fef3c7;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            color: #92400e;
-            font-weight: 600;
-        }
-        
-        .pnl {
-            font-weight: 600;
-            font-size: 14px;
-        }
-        
-        .pnl.positive {
-            color: #10b981;
-        }
-        
-        .pnl.negative {
-            color: #ef4444;
-        }
-        
-        .sidebar {
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-        
-        .sidebar-card {
-            background: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        
-        .sidebar-card h3 {
-            margin-bottom: 15px;
-            color: #333;
-            font-size: 14px;
-        }
-        
-        .mini-stat {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid #e9ecef;
-            font-size: 13px;
-        }
-        
-        .mini-stat:last-child {
-            border-bottom: none;
-        }
-        
-        .mini-stat-label {
-            color: #666;
-        }
-        
-        .mini-stat-value {
-            font-weight: 600;
-            color: #333;
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 20px;
-            color: #666;
-        }
-        
-        .error {
-            background: #fee2e2;
-            color: #991b1b;
-            padding: 15px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-        }
-        
-        @media (max-width: 768px) {
-            .main-content {
-                grid-template-columns: 1fr;
-            }
-            
-            .stats-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            
-            .trades-table {
-                font-size: 12px;
-            }
-            
-            .trades-table th, .trades-table td {
-                padding: 8px 4px;
-            }
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #333; min-height: 100vh; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        header { background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #667eea; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .stat-card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+        .stat-label { color: #666; font-size: 12px; text-transform: uppercase; margin-bottom: 10px; }
+        .stat-value { font-size: 28px; font-weight: bold; color: #333; }
+        .stat-value.positive { color: #10b981; }
+        .stat-value.negative { color: #ef4444; }
+        .trades-section { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .trades-section h2 { margin-bottom: 20px; font-size: 18px; }
+        .trades-table { width: 100%; border-collapse: collapse; }
+        .trades-table thead { background: #f8f9fa; border-bottom: 2px solid #e9ecef; }
+        .trades-table th { padding: 12px 8px; text-align: left; font-weight: 600; color: #666; font-size: 12px; text-transform: uppercase; }
+        .trades-table td { padding: 12px 8px; border-bottom: 1px solid #e9ecef; }
+        .trades-table tr:hover { background: #f8f9fa; }
+        .loading { text-align: center; padding: 20px; color: #666; }
+        .error { color: #ef4444; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
             <h1>📊 Forex Trading Bot Dashboard</h1>
-            <p>Real-time trading performance monitoring</p>
+            <p>Real-time trading performance</p>
         </header>
         
         <div class="stats-grid" id="statsGrid">
             <div class="loading">Loading stats...</div>
         </div>
         
-        <div class="main-content">
-            <div class="trades-section">
-                <h2>Recent Trades</h2>
-                <table class="trades-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Symbol</th>
-                            <th>Direction</th>
-                            <th>Entry</th>
-                            <th>Exit</th>
-                            <th>Status</th>
-                            <th>P&L</th>
-                            <th>Strategy</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tradesBody">
-                        <tr><td colspan="8" class="loading">Loading trades...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            
-            <div class="sidebar">
-                <div class="sidebar-card">
-                    <h3>📈 Performance</h3>
-                    <div id="perfStats"></div>
-                </div>
-            </div>
+        <div class="trades-section">
+            <h2>Recent Trades</h2>
+            <table class="trades-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Symbol</th>
+                        <th>Direction</th>
+                        <th>Entry</th>
+                        <th>Exit</th>
+                        <th>Status</th>
+                        <th>P&L</th>
+                        <th>Strategy</th>
+                    </tr>
+                </thead>
+                <tbody id="tradesBody">
+                    <tr><td colspan="8" class="loading">Loading trades...</td></tr>
+                </tbody>
+            </table>
         </div>
     </div>
-    
+
     <script>
         async function loadStats() {
             try {
@@ -293,53 +70,23 @@
                 statsGrid.innerHTML = `
                     <div class="stat-card">
                         <div class="stat-label">Starting Balance</div>
-                        <div class="stat-value">$${stats.starting_balance.toFixed(2)}</div>
+                        <div class="stat-value">$${(stats.starting_balance || 200).toFixed(2)}</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Current Balance</div>
-                        <div class="stat-value ${stats.current_balance >= stats.starting_balance ? 'positive' : 'negative'}">
-                            $${stats.current_balance.toFixed(2)}
+                        <div class="stat-value ${(stats.current_balance || 0) >= (stats.starting_balance || 200) ? 'positive' : 'negative'}">
+                            $${(stats.current_balance || 200).toFixed(2)}
                         </div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Total P&L</div>
-                        <div class="stat-value ${stats.total_pnl >= 0 ? 'positive' : 'negative'}">
-                            ${stats.total_pnl >= 0 ? '+' : ''}$${stats.total_pnl.toFixed(2)}
+                        <div class="stat-value ${(stats.total_pnl || 0) >= 0 ? 'positive' : 'negative'}">
+                            ${(stats.total_pnl || 0) >= 0 ? '+' : ''}$${(stats.total_pnl || 0).toFixed(2)}
                         </div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-label">Win Rate</div>
-                        <div class="stat-value">${stats.win_rate.toFixed(1)}%</div>
-                    </div>
-                `;
-                
-                const perfStats = document.getElementById('perfStats');
-                perfStats.innerHTML = `
-                    <div class="mini-stat">
-                        <span class="mini-stat-label">Total Trades:</span>
-                        <span class="mini-stat-value">${stats.total_trades}</span>
-                    </div>
-                    <div class="mini-stat">
-                        <span class="mini-stat-label">Closed:</span>
-                        <span class="mini-stat-value">${stats.closed_trades}</span>
-                    </div>
-                    <div class="mini-stat">
-                        <span class="mini-stat-label">Open:</span>
-                        <span class="mini-stat-value">${stats.open_trades}</span>
-                    </div>
-                    <div class="mini-stat">
-                        <span class="mini-stat-label">Wins:</span>
-                        <span class="mini-stat-value" style="color: #10b981;">${stats.wins}</span>
-                    </div>
-                    <div class="mini-stat">
-                        <span class="mini-stat-label">Losses:</span>
-                        <span class="mini-stat-value" style="color: #ef4444;">${stats.losses}</span>
-                    </div>
-                    <div class="mini-stat">
-                        <span class="mini-stat-label">Avg P&L:</span>
-                        <span class="mini-stat-value" style="color: ${stats.avg_pnl >= 0 ? '#10b981' : '#ef4444'};">
-                            ${stats.avg_pnl >= 0 ? '+' : ''}$${stats.avg_pnl.toFixed(2)}
-                        </span>
+                        <div class="stat-value">${(stats.win_rate || 0).toFixed(1)}%</div>
                     </div>
                 `;
             } catch (error) {
@@ -352,37 +99,36 @@
                 const response = await fetch('/api/trades');
                 const trades = await response.json();
                 
-                const tradesBody = document.getElementById('tradesBody');
-                if (trades.length === 0) {
-                    tradesBody.innerHTML = '<tr><td colspan="8" class="loading">No trades yet</td></tr>';
+                if (!Array.isArray(trades) || trades.length === 0) {
+                    document.getElementById('tradesBody').innerHTML = '<tr><td colspan="8" class="loading">No trades yet</td></tr>';
                     return;
                 }
                 
-                tradesBody.innerHTML = trades.map(trade => `
+                const html = trades.map(trade => `
                     <tr>
-                        <td>${trade.id}</td>
-                        <td class="symbol">${trade.symbol}</td>
-                        <td class="${trade.direction === 'BUY' ? 'buy' : 'sell'}">${trade.direction}</td>
-                        <td>${parseFloat(trade.entry_price).toFixed(5)}</td>
+                        <td>${trade.id || '-'}</td>
+                        <td>${trade.symbol || '-'}</td>
+                        <td style="color: ${trade.direction === 'BUY' ? '#10b981' : '#ef4444'}; font-weight: 600;">${trade.direction || '-'}</td>
+                        <td>${parseFloat(trade.entry_price || 0).toFixed(5)}</td>
                         <td>${trade.exit_price ? parseFloat(trade.exit_price).toFixed(5) : '-'}</td>
-                        <td><span class="${trade.status === 'CLOSED' ? 'closed' : 'open'}">${trade.status}</span></td>
-                        <td class="pnl ${trade.net_pnl >= 0 ? 'positive' : 'negative'}">
-                            ${trade.net_pnl ? (trade.net_pnl >= 0 ? '+' : '') + trade.net_pnl.toFixed(2) : '-'}
+                        <td>${trade.status || '-'}</td>
+                        <td style="color: ${(trade.net_pnl || 0) >= 0 ? '#10b981' : '#ef4444'}; font-weight: 600;">
+                            ${trade.net_pnl ? (trade.net_pnl >= 0 ? '+' : '') + parseFloat(trade.net_pnl).toFixed(2) : '-'}
                         </td>
                         <td>${trade.strategy || '-'}</td>
                     </tr>
                 `).join('');
+                
+                document.getElementById('tradesBody').innerHTML = html;
             } catch (error) {
                 console.error('Error loading trades:', error);
+                document.getElementById('tradesBody').innerHTML = '<tr><td colspan="8" class="error">Failed to load trades</td></tr>';
             }
         }
         
-        // Load on page load
         document.addEventListener('DOMContentLoaded', () => {
             loadStats();
             loadTrades();
-            
-            // Auto-refresh every 5 seconds
             setInterval(() => {
                 loadStats();
                 loadTrades();
