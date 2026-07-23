@@ -1,20 +1,5 @@
-# مكتبات الربط الرسمية لمنصة cTrader
-ctrader-open-api==0.9.1
-ctrader-fix==0.1.1
-Twisted==21.7.0
-
-# مكتبة الاتصال وإدارة قاعدة البيانات السحابية (Railway & Neon)
-psycopg2-binary>=2.9.9
-
-# مطلوبة لدعم اتصال SSL في Twisted (بدونها يفشل الاتصال بصمت مع NameError)
-pyopenssl>=24.0.0
-service_identity>=24.0.0
-
-# يستخدمها كلاس Auth لتبادل رمز التفويض والاتصال بالـ API و تيليجرام
-requests>=2.31.0
-
-#
-Flask>=2.3.0
-openpyxl>=3.1.0
-python-dotenv>=1.0.0
-Werkzeug>=2.3.0
+flask==2.3.0
+psycopg2-binary==2.9.6
+requests==2.31.0
+python-dotenv==1.0.0
+gunicorn==21.2.0
