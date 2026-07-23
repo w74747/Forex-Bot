@@ -2,125 +2,51 @@
 ctrader_openapi.py - Real cTrader OpenAPI Connection
 """
 
-import logging
 import requests
-from datetime import datetime
-from typing import Dict, Optional
+import logging
+import time
 
-logger = logging.getLogger("ctrader_openapi")
+logger = logging.getLogger("ctrader")
 
 class CTraderOpenAPI:
-    """ربط مباشر مع cTrader عبر OpenAPI"""
-    
-    def __init__(self, client_id, account_id, username, password):
+    def __init__(self, client_id, access_token, account_id):
         self.client_id = client_id
+        self.access_token = access_token
         self.account_id = account_id
-        self.username = username
-        self.password = password
-        
-        self.access_token = None
-        self.connected = False
-        self.api_url = "https://openapi.ctrader.com/v1"
-        self.auth_url = "https://openapi.ctrader.com/auth/oauth/token"
-        
-        self.balance = 0.0
-        self.equity = 0.0
-    
-    def connect(self) -> bool:
-        """الاتصال والحصول على access token"""
-        try:
-            auth_data = {
-                "grant_type": "password",
-                "username": self.username,
-                "password": self.password,
-                "client_id": self.client_id
-            }
-            
-            response = requests.post(self.auth_url, json=auth_data, timeout=10)
-            
-            if response.status_code == 200:
-                token_data = response.json()
-                self.access_token = token_data.get('access_token')
-                self.connected = True
-                logger.info("[cTrader OpenAPI] ✅ Connected successfully")
-                self._update_account_info()
-                return True
-            else:
-                logger.error(f"[cTrader Auth] Failed: {response.status_code}")
-                self.connected = False
-                return False
-        except Exception as e:
-            logger.error(f"[cTrader Connect] {e}")
-            self.connected = False
-            return False
-    
-    def get_headers(self) -> Dict:
-        """رؤوس الطلب"""
-        return {
-            "Authorization": f"Bearer {self.access_token}",
+        self.base_url = "https://openapi.ctrader.com"
+        self.headers = {
+            "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
+        self.last_prices = {}
     
-    def _update_account_info(self):
-        """تحديث معلومات الحساب"""
+    def get_price(self, symbol):
+        """احصل على السعر الحالي"""
         try:
-            if not self.connected or not self.access_token:
-                return False
-            
-            url = f"{self.api_url}/accounts/{self.account_id}"
-            response = requests.get(url, headers=self.get_headers(), timeout=10)
+            url = f"{self.base_url}/v1/accounts/{self.account_id}/symbols/{symbol}/current"
+            response = requests.get(url, headers=self.headers, timeout=5)
             
             if response.status_code == 200:
                 data = response.json()
-                self.balance = data.get('balance', 0) / 100
-                self.equity = data.get('equity', 0) / 100
-                logger.info(f"[Account] Balance: ${self.balance:.2f} | Equity: ${self.equity:.2f}")
-                return True
-            else:
-                logger.error(f"[Account Info] Status: {response.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"[Account Update] {e}")
-            return False
-    
-    def get_account_info(self) -> Optional[Dict]:
-        """قراءة معلومات الحساب"""
-        try:
-            self._update_account_info()
-            return {
-                'balance': self.balance,
-                'equity': self.equity,
-                'account_id': self.account_id,
-                'timestamp': datetime.now().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"[Get Account] {e}")
-            return None
-    
-    def get_price(self, symbol: str) -> Optional[Dict]:
-        """قراءة السعر الحالي"""
-        try:
-            if not self.connected:
-                return None
+                if 'data' in data:
+                    tick = data['data']
+                    bid = float(tick.get('bid', 0))
+                    ask = float(tick.get('ask', 0))
+                    
+                    if bid > 0 and ask > 0:
+                        self.last_prices[symbol] = {'bid': bid, 'ask': ask}
+                        logger.info(f"[cTrader REAL] {symbol} BID:{bid:.5f} ASK:{ask:.5f}")
+                        return {'bid': bid, 'ask': ask}
             
-            url = f"{self.api_url}/symbols/{symbol}/current-quotes"
-            response = requests.get(url, headers=self.get_headers(), timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                quote = data.get('quote', {})
-                return {
-                    'bid': quote.get('bid', 0) / 100000,
-                    'ask': quote.get('ask', 0) / 100000
-                }
-            return None
+            return self.last_prices.get(symbol, {'bid': 0, 'ask': 0})
         except Exception as e:
-            logger.error(f"[Get Price {symbol}] {e}")
-            return None
+            logger.error(f"cTrader error: {e}")
+            return self.last_prices.get(symbol, {'bid': 0, 'ask': 0})
     
-    def is_connected(self) -> bool:
-        return self.connected
-    
-    def disconnect(self):
-        self.connected = False
-        self.access_token = None
+    def get_all_prices(self, symbols):
+        """احصل على أسعار جميع الرموز"""
+        prices = {}
+        for symbol in symbols:
+            prices[symbol] = self.get_price(symbol)
+            time.sleep(0.2)  # تجنب throttling
+        return prices
