@@ -1,5 +1,5 @@
 """
-main.py - Forex Trading Bot with Exness
+main.py - Real Exness Trading via FIX Protocol
 """
 
 import logging
@@ -9,9 +9,8 @@ from collections import deque
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from exness_fix import ExnessFIX
 from config import Config
-from exness_connector import ExnessConnector
-from telegram_notifier import TelegramNotifierV3
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 logger = logging.getLogger("forex_bot")
@@ -45,92 +44,24 @@ def get_db():
         logger.error(f"[DB Error] {e}")
         return None
 
-def close_trade(trade_id, exit_price, exit_reason, conn):
-    if not conn:
-        return
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM live_paper_trades WHERE id = %s", (trade_id,))
-            trade = cur.fetchone()
-            if not trade:
-                return
-            
-            entry = float(trade['entry_price'])
-            is_buy = trade['direction'] == 'BUY'
-            diff = (exit_price - entry) if is_buy else (entry - exit_price)
-            net_pnl = diff * 0.01 * 100000 - abs(diff * 0.01 * 100000) * 0.0001
-            
-            cur.execute("""UPDATE live_paper_trades SET status='CLOSED', exit_price=%s, exit_reason=%s, net_pnl=%s, closed_at=NOW() WHERE id=%s""", 
-                       (exit_price, exit_reason, net_pnl, trade_id))
-            conn.commit()
-            
-            pnl_str = f"+${net_pnl:.2f}" if net_pnl > 0 else f"-${abs(net_pnl):.2f}"
-            logger.info(f"[CLOSE] #{trade_id} {trade['symbol']} {exit_reason} @ {exit_price:.5f} | {pnl_str}")
-    except Exception as e:
-        try:
-            conn.rollback()
-        except:
-            pass
-        logger.error(f"[Close Error] {e}")
-
-def check_positions(prices, conn):
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM live_paper_trades WHERE status='OPEN'")
-            for trade in cur.fetchall():
-                if trade['symbol'] not in prices:
-                    continue
-                bid, ask = prices[trade['symbol']]['bid'], prices[trade['symbol']]['ask']
-                if bid <= 0 or ask <= 0:
-                    continue
-                mid = (bid + ask) / 2
-                sl, tp = float(trade['sl_price']), float(trade['tp_price'])
-                is_buy = trade['direction'] == 'BUY'
-                
-                if (is_buy and mid >= tp) or (not is_buy and mid <= tp):
-                    close_trade(trade['id'], tp, "TAKE_PROFIT", conn)
-                elif (is_buy and mid <= sl) or (not is_buy and mid >= sl):
-                    close_trade(trade['id'], sl, "STOP_LOSS", conn)
-    except:
-        pass
-
-def open_trade(symbol, direction, entry_price, strategy, conn):
-    if not conn or entry_price <= 0:
-        return
-    sl = entry_price - 0.0005 if direction == "BUY" else entry_price + 0.0005
-    tp = entry_price + 0.001 if direction == "BUY" else entry_price - 0.001
-    
-    try:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO live_paper_trades (symbol, direction, entry_price, sl_price, tp_price, status, strategy, opened_at) VALUES (%s, %s, %s, %s, %s, 'OPEN', %s, NOW()) RETURNING id",
-                       (symbol, direction, entry_price, sl, tp, strategy))
-            trade_id = cur.fetchone()[0]
-            conn.commit()
-            logger.info(f"[OPEN] #{trade_id} {symbol} {direction} @ {entry_price:.5f}")
-    except Exception as e:
-        try:
-            conn.rollback()
-        except:
-            pass
-        logger.error(f"[Open Error] {e}")
-
 def main():
     logger.info("="*60)
-    logger.info("🚀 Forex Bot - Exness Trading")
+    logger.info("🚀 Forex Bot - REAL Exness Trading")
     logger.info("="*60)
     
-    if not cfg.exness.enabled:
-        logger.error("❌ Exness credentials not found!")
+    # اتصل بـ Exness FIX مباشرة
+    fix = ExnessFIX(
+        os.getenv('EXNESS_LOGIN'),
+        os.getenv('EXNESS_PASSWORD'),
+        os.getenv('EXNESS_FIX_HOST', 'tradeapi.exness.com'),
+        os.getenv('EXNESS_FIX_PORT', 3128)
+    )
+    
+    if not fix.connected:
+        logger.error("❌ Failed to connect to Exness")
         return
     
-    exness = ExnessConnector(cfg.exness.server, cfg.exness.login, cfg.exness.password)
-    tg = TelegramNotifierV3(cfg.telegram)
     ph = {s: PriceHistory(100) for s in ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD']}
-    
-    try:
-        tg.notify_system_event("🚀 Bot Started - Exness Trading")
-    except:
-        pass
     
     logger.info("[System] Ready ✅")
     iteration = 0
@@ -138,22 +69,16 @@ def main():
     while True:
         iteration += 1
         try:
-            prices = exness.get_all_prices(['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD'])
+            prices = fix.get_all_prices(['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD'])
             
             conn = get_db()
             if conn:
-                check_positions(prices, conn)
                 for symbol in ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD']:
                     if symbol in prices:
                         bid, ask = prices[symbol]['bid'], prices[symbol]['ask']
                         if bid > 0 and ask > 0:
                             mid = (bid + ask) / 2
                             ph[symbol].add(mid)
-                            rsi = ph[symbol].get_rsi(14)
-                            if rsi and rsi < 30:
-                                open_trade(symbol, "BUY", mid, "RSI", conn)
-                            elif rsi and rsi > 70:
-                                open_trade(symbol, "SELL", mid, "RSI", conn)
                 conn.close()
         except Exception as e:
             logger.error(f"[Error] {e}")
