@@ -2,77 +2,57 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Forex Bot Dashboard</title>
+    <title>Forex Dashboard</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: Arial; background: #f5f5f5; padding: 20px; }
         .container { max-width: 1200px; margin: 0 auto; }
-        h1 { color: #333; margin-bottom: 20px; }
+        h1 { margin-bottom: 20px; }
         .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px; }
-        .stat { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .stat-label { font-size: 12px; color: #999; }
-        .stat-value { font-size: 24px; font-weight: bold; margin-top: 10px; }
+        .stat { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }
+        .stat-value { font-size: 28px; font-weight: bold; color: #333; }
         .stat-value.positive { color: #10b981; }
         .stat-value.negative { color: #ef4444; }
-        .filters { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; align-items: flex-end; }
-        input { padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
-        button { padding: 10px 20px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #5568d3; }
         table { width: 100%; background: white; border-collapse: collapse; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        th { background: #f8f9fa; padding: 12px; text-align: left; font-weight: 600; }
+        th { background: #f8f9fa; padding: 12px; text-align: left; font-weight: 600; font-size: 12px; }
         td { padding: 12px; border-bottom: 1px solid #e9ecef; }
         tr:hover { background: #f8f9fa; }
-        .pagination { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
-        .pagination button { background: #ddd; color: #333; }
-        .pagination button.active { background: #667eea; color: white; }
-        .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .pagination { text-align: center; padding: 20px; }
+        .pagination button { margin: 0 5px; padding: 8px 15px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .pagination button:hover { background: #5568d3; }
+        .loading { text-align: center; color: #999; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📊 Forex Trading Bot Dashboard</h1>
+        <h1>📊 Forex Dashboard</h1>
         
         <div class="stats">
             <div class="stat">
-                <div class="stat-label">Starting Balance</div>
-                <div class="stat-value" id="start-bal">$200.00</div>
+                <div>Starting</div>
+                <div class="stat-value">$200</div>
             </div>
             <div class="stat">
-                <div class="stat-label">Current Balance</div>
-                <div class="stat-value" id="curr-bal">$200.00</div>
+                <div>Current</div>
+                <div class="stat-value" id="balance">$200</div>
             </div>
             <div class="stat">
-                <div class="stat-label">Total P&L</div>
-                <div class="stat-value" id="total-pnl">$0.00</div>
+                <div>P&L</div>
+                <div class="stat-value" id="pnl">$0</div>
             </div>
             <div class="stat">
-                <div class="stat-label">Win Rate</div>
-                <div class="stat-value" id="win-rate">0%</div>
+                <div>Win Rate</div>
+                <div class="stat-value" id="wr">0%</div>
             </div>
         </div>
         
-        <div class="filters">
-            <input type="date" id="from-date" placeholder="From Date">
-            <input type="date" id="to-date" placeholder="To Date">
-            <button onclick="loadTrades(1)">Search</button>
-        </div>
-        
-        <h2>Recent Trades</h2>
+        <h2>Recent Closed Trades</h2>
         <table>
             <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Symbol</th>
-                    <th>Direction</th>
-                    <th>Entry</th>
-                    <th>Exit</th>
-                    <th>P&L</th>
-                    <th>Strategy</th>
-                    <th>Date</th>
-                </tr>
+                <tr><th>ID</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Strategy</th><th>Date</th></tr>
             </thead>
             <tbody id="trades">
-                <tr><td colspan="8" style="text-align: center; padding: 20px;">Loading...</td></tr>
+                <tr><td colspan="8" class="loading">Loading...</td></tr>
             </tbody>
         </table>
         
@@ -80,78 +60,46 @@
     </div>
 
     <script>
-        async function loadStats() {
+        async function load() {
             try {
-                const res = await fetch('/api/stats');
-                const stats = await res.json();
+                const s = await fetch('/api/stats').then(r => r.json());
+                document.getElementById('balance').innerText = '$' + (s.balance || 200).toFixed(2);
+                document.getElementById('pnl').innerText = '$' + (s.pnl || 0).toFixed(2);
+                document.getElementById('pnl').className = 'stat-value ' + (s.pnl >= 0 ? 'positive' : 'negative');
+                document.getElementById('wr').innerText = (s.wr || 0).toFixed(1) + '%';
                 
-                document.getElementById('start-bal').innerText = '$' + (stats.starting_balance || 200).toFixed(2);
-                document.getElementById('curr-bal').innerText = '$' + (stats.current_balance || 200).toFixed(2);
-                document.getElementById('total-pnl').innerText = '$' + (stats.total_pnl || 0).toFixed(2);
-                document.getElementById('win-rate').innerText = (stats.win_rate || 0).toFixed(1) + '%';
-            } catch (e) {
-                console.error('Error loading stats:', e);
-            }
-        }
-        
-        async function loadTrades(page = 1) {
-            try {
-                const fromDate = document.getElementById('from-date').value;
-                const toDate = document.getElementById('to-date').value;
+                const page = parseInt(new URLSearchParams(window.location.search).get('p') || 1);
+                const t = await fetch('/api/trades?page=' + page).then(r => r.json());
                 
-                let url = `/api/trades?page=${page}`;
-                if (fromDate) url += `&from_date=${fromDate}`;
-                if (toDate) url += `&to_date=${toDate}`;
-                
-                const res = await fetch(url);
-                const data = await res.json();
-                
-                if (!data.trades || data.trades.length === 0) {
-                    document.getElementById('trades').innerHTML = '<tr><td colspan="8" style="text-align: center;">No trades found</td></tr>';
-                    document.getElementById('pagination').innerHTML = '';
+                if (!t.trades || t.trades.length === 0) {
+                    document.getElementById('trades').innerHTML = '<tr><td colspan="8" class="loading">No trades</td></tr>';
                     return;
                 }
                 
-                document.getElementById('trades').innerHTML = data.trades.map(t => `
+                document.getElementById('trades').innerHTML = t.trades.map(tr => `
                     <tr>
-                        <td>${t.id}</td>
-                        <td>${t.symbol}</td>
-                        <td style="color: ${t.direction === 'BUY' ? '#10b981' : '#ef4444'}; font-weight: bold;">${t.direction}</td>
-                        <td>${parseFloat(t.entry_price || 0).toFixed(5)}</td>
-                        <td>${t.exit_price ? parseFloat(t.exit_price).toFixed(5) : '-'}</td>
-                        <td style="color: ${(t.net_pnl || 0) >= 0 ? '#10b981' : '#ef4444'}; font-weight: bold;">
-                            ${t.net_pnl ? (t.net_pnl >= 0 ? '+' : '') + parseFloat(t.net_pnl).toFixed(2) : '-'}
-                        </td>
-                        <td>${t.strategy || '-'}</td>
-                        <td>${t.closed_at.substring(0, 19)}</td>
+                        <td>${tr.id}</td>
+                        <td>${tr.symbol}</td>
+                        <td style="color: ${tr.direction === 'BUY' ? '#10b981' : '#ef4444'}; font-weight: bold;">${tr.direction}</td>
+                        <td>${tr.entry.toFixed(5)}</td>
+                        <td>${tr.exit.toFixed(5)}</td>
+                        <td style="color: ${tr.pnl >= 0 ? '#10b981' : '#ef4444'}; font-weight: bold;">${tr.pnl >= 0 ? '+' : ''}${tr.pnl.toFixed(2)}</td>
+                        <td>${tr.strategy}</td>
+                        <td>${tr.date.substring(0, 16)}</td>
                     </tr>
                 `).join('');
                 
-                // Pagination
-                let paginationHTML = '';
-                if (data.page > 1) {
-                    paginationHTML += `<button onclick="loadTrades(1)">First</button>`;
-                    paginationHTML += `<button onclick="loadTrades(${data.page - 1})">Prev</button>`;
+                let pag = '';
+                for (let i = 1; i <= t.pages; i++) {
+                    pag += `<button onclick="location.href='?p=${i}'" ${i === page ? 'style="background: #333;"' : ''}>${i}</button>`;
                 }
-                
-                for (let i = Math.max(1, data.page - 2); i <= Math.min(data.total_pages, data.page + 2); i++) {
-                    paginationHTML += `<button class="${i === data.page ? 'active' : ''}" onclick="loadTrades(${i})">${i}</button>`;
-                }
-                
-                if (data.page < data.total_pages) {
-                    paginationHTML += `<button onclick="loadTrades(${data.page + 1})">Next</button>`;
-                    paginationHTML += `<button onclick="loadTrades(${data.total_pages})">Last</button>`;
-                }
-                
-                document.getElementById('pagination').innerHTML = paginationHTML;
+                document.getElementById('pagination').innerHTML = pag;
             } catch (e) {
-                console.error('Error loading trades:', e);
+                console.error(e);
             }
         }
-        
-        loadStats();
-        loadTrades(1);
-        setInterval(loadStats, 10000);
+        load();
+        setInterval(load, 15000);
     </script>
 </body>
 </html>
