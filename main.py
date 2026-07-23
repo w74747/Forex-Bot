@@ -342,3 +342,40 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# في دالة open_trade - أضف قبل return:
+def open_trade(symbol, direction, entry_price, strategy, conn, capital_manager, telegram_notifier):
+    # ... الكود السابق ...
+    logger.info(f"[{strategy}] OPEN #{trade_id} {symbol} {direction} {lot_size} lots @ {entry_price:.5f} TP:{tp_price:.5f} SL:{sl_price:.5f}")
+    
+    # إرسال إشعار تلجرام
+    try:
+        telegram_notifier.notify_trade(
+            trade_id=trade_id,
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            tp=tp_price,
+            sl=sl_price,
+            lot_size=lot_size,
+            action="OPEN"
+        )
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
+
+# في دالة close_trade - أضف بعد conn.commit():
+    pnl_str = f"+${net_pnl:.2f}" if net_pnl > 0 else f"-${abs(net_pnl):.2f}"
+    strategy = trade['strategy'] if trade['strategy'] else 'UNKNOWN'
+    logger.info(f"[{strategy}] CLOSE #{trade_id} {trade['symbol']} {exit_reason} @ {exit_price:.5f} | {pnl_str}")
+    
+    # إرسال إشعار تلجرام
+    try:
+        telegram_notifier.notify_trade(
+            trade_id=trade_id,
+            symbol=trade['symbol'],
+            pnl=net_pnl,
+            exit_reason=exit_reason,
+            action="CLOSE"
+        )
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
