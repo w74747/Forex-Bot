@@ -1,92 +1,138 @@
 """
-main.py - Real Exness Trading via FIX Protocol
+main.py - Exness Forex Trading Bot
 """
 
 import logging
 import time
-import os
 from collections import deque
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
-from exness_fix import ExnessFIX
-from config import Config
+from config import ExnessConfig, TradingConfig
+from mt5_connector import MT5Connector
+from database import Database
+from telegram_notify import TelegramNotifier
+from strategies import TradingStrategies
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
-logger = logging.getLogger("forex_bot")
+logger = logging.getLogger("bot")
 
-cfg = Config()
-
-class PriceHistory:
-    def __init__(self, max_size=100):
-        self.prices = deque(maxlen=max_size)
+class ForexBot:
+    def __init__(self):
+        logger.info("="*60)
+        logger.info("🚀 Exness Forex Trading Bot")
+        logger.info("="*60)
+        
+        self.mt5 = MT5Connector()
+        self.db = Database()
+        self.telegram = TelegramNotifier()
+        self.price_history = {s: deque(maxlen=50) for s in TradingConfig.SYMBOLS}
+        
+        if not self.mt5.connected:
+            logger.error("❌ Failed to connect to Exness")
+            raise Exception("MT5 Connection failed")
+        
+        logger.info("✅ Bot Initialized")
     
-    def add(self, price):
-        self.prices.append(price)
+    def get_current_prices(self):
+        """احصل على الأسعار الحالية"""
+        return self.mt5.get_all_prices(TradingConfig.SYMBOLS)
     
-    def get_rsi(self, period=14):
-        if len(self.prices) < period:
+    def analyze_symbol(self, symbol):
+        """حلل الرمز"""
+        prices = self.price_history[symbol]
+        if len(prices) < 20:
             return None
-        prices = list(self.prices)[-period:]
-        gains = sum(prices[i] - prices[i-1] for i in range(1, len(prices)) if prices[i] > prices[i-1])
-        losses = sum(prices[i-1] - prices[i] for i in range(1, len(prices)) if prices[i] < prices[i-1])
-        avg_gain = gains / period if gains > 0 else 0
-        avg_loss = losses / period if losses > 0 else 0
-        if avg_loss == 0:
-            return 100 if avg_gain > 0 else 0
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
-
-def get_db():
-    try:
-        return psycopg2.connect(cfg.database_url, connect_timeout=5)
-    except Exception as e:
-        logger.error(f"[DB Error] {e}")
+        
+        # جرب استراتيجيات متعددة
+        rsi_signal = TradingStrategies.rsi_strategy(list(prices))
+        ma_signal = TradingStrategies.moving_average_strategy(list(prices))
+        
+        # تحتاج إشارتين لفتح صفقة
+        if rsi_signal == ma_signal and rsi_signal:
+            return rsi_signal
         return None
-
-def main():
-    logger.info("="*60)
-    logger.info("🚀 Forex Bot - REAL Exness Trading")
-    logger.info("="*60)
     
-    # اتصل بـ Exness FIX مباشرة
-    fix = ExnessFIX(
-        os.getenv('EXNESS_LOGIN'),
-        os.getenv('EXNESS_PASSWORD'),
-        os.getenv('EXNESS_FIX_HOST', 'tradeapi.exness.com'),
-        os.getenv('EXNESS_FIX_PORT', 3128)
-    )
-    
-    if not fix.connected:
-        logger.error("❌ Failed to connect to Exness")
-        return
-    
-    ph = {s: PriceHistory(100) for s in ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD']}
-    
-    logger.info("[System] Ready ✅")
-    iteration = 0
-    
-    while True:
-        iteration += 1
+    def run(self):
+        """شغّل البوت"""
+        logger.info("[System] Ready ✅")
+        iteration = 0
+        
         try:
-            prices = fix.get_all_prices(['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD'])
-            
-            conn = get_db()
-            if conn:
-                for symbol in ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD']:
-                    if symbol in prices:
-                        bid, ask = prices[symbol]['bid'], prices[symbol]['ask']
-                        if bid > 0 and ask > 0:
-                            mid = (bid + ask) / 2
-                            ph[symbol].add(mid)
-                conn.close()
+            while True:
+                iteration += 1
+                
+                # احصل على الأسعار الحالية
+                prices = self.get_current_prices()
+                
+                # أضف للسجل التاريخي
+                for symbol, price_data in prices.items():
+                    if price_data['bid'] > 0:
+                        mid_price = (price_data['bid'] + price_data['ask']) / 2
+                        self.price_history[symbol].append(mid_price)
+                        logger.info(f"[{symbol}] BID:{price_data['bid']:.5f} ASK:{price_data['ask']:.5f}")
+                
+                # تحليل كل رمز
+                for symbol in TradingConfig.SYMBOLS:
+                    signal = self.analyze_symbol(symbol)
+                    if signal:
+                        self.open_trade(symbol, signal)
+                
+                # تحقق من الصفقات المفتوحة
+                self.check_open_positions(prices)
+                
+                if iteration % 60 == 0:
+                    logger.info(f"[System] Running... {iteration} iterations")
+                
+                time.sleep(30)
+        
+        except KeyboardInterrupt:
+            logger.info("⏹️ Bot stopped")
         except Exception as e:
-            logger.error(f"[Error] {e}")
-        
-        if iteration % 60 == 0:
-            logger.info(f"[System] Running... {iteration} iterations")
-        
-        time.sleep(30)
+            logger.error(f"[Fatal] {e}")
+            self.telegram.notify_error(str(e))
+        finally:
+            self.mt5.shutdown()
+    
+    def open_trade(self, symbol, direction):
+        """فتح صفقة"""
+        try:
+            # احصل على السعر الحالي
+            price = self.mt5.get_price(symbol)
+            if price['bid'] <= 0:
+                return
+            
+            # احسب SL و TP
+            entry = (price['bid'] + price['ask']) / 2
+            if direction == "BUY":
+                sl = entry - 0.0050
+                tp = entry + 0.0100
+            else:
+                sl = entry + 0.0050
+                tp = entry - 0.0100
+            
+            # فتح الصفقة على MT5
+            result = self.mt5.open_trade(symbol, direction, TradingConfig.LOT_SIZE, sl, tp)
+            if result:
+                self.telegram.notify_trade_open(symbol, direction, entry)
+                logger.info(f"✅ OPEN: {symbol} {direction} @ {entry:.5f}")
+        except Exception as e:
+            logger.error(f"Error opening trade: {e}")
+    
+    def check_open_positions(self, prices):
+        """تحقق من الصفقات المفتوحة"""
+        try:
+            positions = self.mt5.get_positions()
+            for pos in positions:
+                symbol = pos.symbol
+                if symbol in prices:
+                    current_price = prices[symbol]
+                    mid = (current_price['bid'] + current_price['ask']) / 2
+                    
+                    pnl = pos.profit
+                    
+                    logger.info(f"[Position] {symbol} P&L: ${pnl:.2f}")
+        except Exception as e:
+            logger.error(f"Error checking positions: {e}")
 
 if __name__ == '__main__':
-    main()
+    bot = ForexBot()
+    bot.run()

@@ -1,6 +1,7 @@
 flask==2.3.0
+MetaTrader5==5.0.45
 psycopg2-binary==2.9.9
-requests==2.31.0
 python-dotenv==1.0.0
+requests==2.31.0
 gunicorn==21.2.0
-websocket-client==1.6.2
+pytz==2023.3

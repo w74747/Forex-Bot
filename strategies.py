@@ -1,56 +1,48 @@
 """
-strategies.py - Advanced Strategies
+strategies.py - Trading Strategies
 """
 
-class AdvancedStrategies:
+import logging
+
+logger = logging.getLogger("strategies")
+
+class TradingStrategies:
     @staticmethod
-    def strategy_momentum_breakout(symbol, bid, ask, price_history):
-        mid = (bid + ask) / 2
-        price_history[symbol].add(mid)
-        if len(list(price_history[symbol].prices)) < 20:
+    def rsi_strategy(prices, period=14):
+        """استراتيجية RSI"""
+        if len(prices) < period:
             return None
-        prices = list(price_history[symbol].prices)[-20:]
-        highest = max(prices[-10:])
-        lowest = min(prices[-10:])
-        rsi = price_history[symbol].get_rsi(14)
-        if mid > highest and rsi and rsi > 50 and rsi < 70:
+        
+        recent = prices[-period:]
+        gains = sum(recent[i] - recent[i-1] for i in range(1, len(recent)) if recent[i] > recent[i-1])
+        losses = sum(recent[i-1] - recent[i] for i in range(1, len(recent)) if recent[i] < recent[i-1])
+        
+        avg_gain = gains / period if gains > 0 else 0
+        avg_loss = losses / period if losses > 0 else 0
+        
+        if avg_loss == 0:
+            rsi = 100 if avg_gain > 0 else 0
+        else:
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+        
+        if rsi < 30:
             return "BUY"
-        if mid < lowest and rsi and rsi < 50 and rsi > 30:
+        elif rsi > 70:
             return "SELL"
         return None
     
     @staticmethod
-    def strategy_macd_crossover(symbol, bid, ask, price_history):
-        mid = (bid + ask) / 2
-        price_history[symbol].add(mid)
-        if len(list(price_history[symbol].prices)) < 26:
+    def moving_average_strategy(prices, short=5, long=20):
+        """استراتيجية المتوسطات المتحركة"""
+        if len(prices) < long:
             return None
-        prices = list(price_history[symbol].prices)
-        ema12 = sum(prices[-12:]) / 12
-        ema26 = sum(prices[-26:]) / 26
-        macd_now = ema12 - ema26
-        macd_prev = (sum(prices[-13:-1]) / 12) - (sum(prices[-27:-1]) / 26)
-        signal = (macd_now + macd_prev) / 2
-        if macd_prev < signal and macd_now > signal:
+        
+        sma_short = sum(prices[-short:]) / short
+        sma_long = sum(prices[-long:]) / long
+        
+        if sma_short > sma_long:
             return "BUY"
-        if macd_prev > signal and macd_now < signal:
-            return "SELL"
-        return None
-    
-    @staticmethod
-    def strategy_mean_reversion(symbol, bid, ask, price_history):
-        mid = (bid + ask) / 2
-        price_history[symbol].add(mid)
-        if len(list(price_history[symbol].prices)) < 50:
-            return None
-        prices = list(price_history[symbol].prices)
-        mean = sum(prices[-50:]) / 50
-        variance = sum((p - mean) ** 2 for p in prices[-50:]) / 50
-        std_dev = variance ** 0.5
-        upper_band = mean + (std_dev * 2)
-        lower_band = mean - (std_dev * 2)
-        if mid < lower_band:
-            return "BUY"
-        if mid > upper_band:
+        elif sma_short < sma_long:
             return "SELL"
         return None
